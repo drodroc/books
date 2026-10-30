@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>产品月账</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="seal-mark">账</span>
+      <div>
+        <strong>产品月账</strong>
+        <em>这个月每个商品赚了还是亏了</em>
+      </div>
+    </div>
+    <nav id="months" class="months" aria-label="月份"></nav>
+    <div class="top-actions">
+      <button type="button" class="btn solid" id="btn-revenue">导入收益</button>
+      <button type="button" class="btn solid" id="btn-expense">导入支出</button>
+      <button type="button" class="btn" id="btn-add">记一笔支出</button>
+      <button type="button" class="btn" id="btn-export">导出本月</button>
+      <details class="more">
+        <summary>更多</summary>
+        <div class="more-menu">
+          <button type="button" id="btn-template">下载支出模板</button>
+          <button type="button" id="btn-backup">备份数据</button>
+          <button type="button" id="btn-restore">从备份恢复</button>
+          <button type="button" id="btn-demo">看一个小例子</button>
+          <button type="button" id="btn-imports">导入记录</button>
+        </div>
+      </details>
+    </div>
+  </header>
+
+  <p class="rules">
+    同一个商品、同一种商品属性的数量和金额会加在一起。确认收货时间在这个月的，算本月收入；这个月付了款但还没有确认收货的，单独列出来，默认不拿来算赚亏。退款成功不计入。右边每一笔支出拖到对应商品上，收入减去这些成本，就是这个商品赚的钱。
+  </p>
+
+  <section id="summary"></section>
+
+  <main>
+    <section class="sheet">
+      <div class="toolbar">
+        <input id="q" type="search" placeholder="搜商品、属性、支出项目" autocomplete="off">
+        <select id="track"><option value="">全部赛道</option></select>
+        <select id="status">
+          <option value="all">全部商品</option>
+          <option value="loss">只看亏损</option>
+          <option value="profit">只看赚钱</option>
+          <option value="unknown">还没挂成本</option>
+          <option value="open">有未确认收货</option>
+        </select>
+        <select id="sort">
+          <option value="confirmed">按确认金额</option>
+          <option value="profit">利润从高到低</option>
+          <option value="loss">先看亏得多的</option>
+          <option value="unknown">先看没挂成本的</option>
+          <option value="name">按名称</option>
+        </select>
+        <div class="basis" role="group" aria-label="收入口径">
+          <span>算盈亏用</span>
+          <button type="button" data-basis="confirmed">只算确认收货</button>
+          <button type="button" data-basis="all">加上未确认</button>
+        </div>
+      </div>
+      <div id="products"></div>
+    </section>
+    <aside id="side">
+      <div class="side-head">
+        <h2>支出</h2>
+        <p>拖到左边的商品上。拖过去是剩下的全部金额，挂上之后可以改小，多出来的会回到这里。</p>
+        <input id="eq" type="search" placeholder="搜支出" autocomplete="off">
+      </div>
+      <div id="expenses"></div>
+    </aside>
+  </main>
+
+  <div id="modal" class="modal hidden"></div>
+  <div id="toast" class="toast hidden" role="status"></div>
+  <input id="file-revenue" type="file" accept=".xlsx,.xlsm,.csv" hidden>
+  <input id="file-expense" type="file" accept=".xlsx,.xlsm,.csv" hidden>
+  <input id="file-restore" type="file" accept=".json,application/json" hidden>
+  <script src="/static/app.js"></script>
+</body>
+</html>
