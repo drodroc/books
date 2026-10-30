@@ -138,6 +138,28 @@ class LedgerTest(unittest.TestCase):
         self.assertEqual(state["summary"]["confirmed_amt"], 1200)
         self.assertEqual(state["summary"]["expense_total"], 1100)
 
+    def test_costs_only_does_not_double_revenue(self):
+        self.import_bytes("收益.xlsx", make_xlsx([("export", [
+            ORDER_HEADERS,
+            ["A1", "示例套件", 1, 10, "颜色:甲", "", 1000, 1000, "没有申请退款", "", "2026-10-01", "1", "2026-10-08"],
+        ])]), "orders")
+        merged = make_xlsx([("按商品属性", [
+            ["商品标题", "商品属性", "销售数量", "买家实付金额", "成本", "明细"],
+            ["示例套件", "颜色:甲", 10, 1000, 700, "板子"],
+        ])])
+        token, _path = ledger.save_upload("合并.xlsx", merged)
+        with self.assertRaises(ValueError):
+            ledger.commit_import(self.conn, token, "aggregated", "2026-10", True, None, "", False, False, False)
+        token, _path = ledger.save_upload("合并.xlsx", merged)
+        result = ledger.commit_import(self.conn, token, "aggregated", "2026-10", True, None, "", False, False, True)
+        self.assertEqual(result["inserted"], 0)
+        self.assertEqual(result["costs"], 1)
+        state = ledger.build_state(self.conn, "2026-10")
+        product = state["products"][0]
+        self.assertEqual(product["confirmed_amt"], 1000)
+        self.assertEqual(product["cost"], 700)
+        self.assertEqual(product["profit"], 300)
+
     def test_drag_split_move_and_month_profit_uses_all_expenses(self):
         self.import_bytes("收益.xlsx", make_xlsx([("export", [
             ORDER_HEADERS,

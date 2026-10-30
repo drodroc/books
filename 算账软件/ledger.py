@@ -605,7 +605,7 @@ def _apply_mapping(chosen, mapping):
     return chosen
 
 
-def commit_import(conn, token, kind, month, include_costs, mapping, track, allow_overlap=False, assign_undated=False):
+def commit_import(conn, token, kind, month, include_costs, mapping, track, allow_overlap=False, assign_undated=False, costs_only=False):
     meta, path = load_upload(token)
     sheets = read_tabular(path)
     chosen = choose_sheet(sheets)
@@ -633,10 +633,10 @@ def commit_import(conn, token, kind, month, include_costs, mapping, track, allow
                WHERE order_no != '' AND (confirm_month = ? OR pay_month = ?)""",
             (month, month),
         ).fetchone()["c"]
-        if overlap_orders and not allow_overlap:
+        if overlap_orders and not allow_overlap and not costs_only:
             raise ValueError(
                 "这个月已经有订单明细。再导入合并表会把收入加一次。"
-                "如果这份合并表才是这个月的收益来源，请勾选「仍然导入」。"
+                "可以改为只导入表里的成本，或勾选「仍然导入」。"
             )
     now = datetime.now().isoformat(timespec="seconds")
     cur = conn.execute(
@@ -655,9 +655,15 @@ def commit_import(conn, token, kind, month, include_costs, mapping, track, allow
             conn, chosen, import_id, meta["filename"], month, assign_undated
         )
     elif kind == "aggregated":
-        inserted, skipped, titles = _commit_aggregated(conn, chosen, import_id, meta["filename"], month)
-        if include_costs:
+        if not costs_only:
+            inserted, skipped, titles = _commit_aggregated(conn, chosen, import_id, meta["filename"], month)
+        if include_costs or costs_only:
             costs, linked = _commit_embedded_costs(conn, chosen, import_id, meta["filename"], month)
+            if costs_only:
+                titles = {row[0] for row in conn.execute(
+                    "SELECT DISTINCT title FROM allocations a JOIN expenses e ON e.id=a.expense_id WHERE e.import_id=?",
+                    (import_id,),
+                )}
     else:
         inserted, skipped, linked = _commit_expenses(conn, chosen, import_id, meta["filename"], month)
     if file_track:

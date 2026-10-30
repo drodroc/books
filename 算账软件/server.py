@@ -198,6 +198,7 @@ class App(BaseHTTPRequestHandler):
                         (body.get("track") or "").strip(),
                         bool(body.get("allow_overlap")),
                         bool(body.get("assign_undated")),
+                        bool(body.get("costs_only")),
                     )
                 )
                 self._json(result)

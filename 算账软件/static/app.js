@@ -469,7 +469,8 @@ function drawPreview(pending) {
     </div>
     ${pending.kind === "orders" && (info.stats.months || {})["（没有日期）"] ? `<label class="flag"><input id="imp-undated" type="checkbox"> 仍然导入这 ${(info.stats.months || {})["（没有日期）"]} 行没有日期的记录，并算进上面的月份（一般不要勾）</label>` : ""}
     ${pending.kind === "aggregated" ? `<label class="flag"><input id="imp-costs" type="checkbox" ${pending.includeCosts ? "checked" : ""}> 同时导入表里「明细」旁边的成本，并挂到对应商品</label>` : ""}
-    ${pending.kind === "aggregated" ? `<label class="flag"><input id="imp-overlap" type="checkbox"> 这个月可能已经有订单明细，仍然导入</label>` : ""}
+    ${pending.kind === "aggregated" ? `<label class="flag"><input id="imp-costs-only" type="checkbox"> 只导入这些成本，不把表里的销售收入再加一次（订单明细已经导入过时用这个）</label>` : ""}
+    ${pending.kind === "aggregated" ? `<label class="flag"><input id="imp-overlap" type="checkbox"> 这个月可能已经有订单明细，仍然把销售收入再导入一次</label>` : ""}
     <details ${info.needs_mapping ? "open" : ""}>
       <summary>列对得上吗</summary>
       <div class="grid-2" style="margin-top:8px">
@@ -530,6 +531,7 @@ async function commitPreview(dialog, pending) {
       kind: pending.kind,
       month: chosenMonth,
       include_costs: !!dialog.querySelector("#imp-costs")?.checked,
+      costs_only: !!dialog.querySelector("#imp-costs-only")?.checked,
       allow_overlap: !!dialog.querySelector("#imp-overlap")?.checked,
       assign_undated: !!dialog.querySelector("#imp-undated")?.checked,
       track: dialog.querySelector("#imp-track").value.trim(),
