@@ -1,6 +1,6 @@
 const fs = require("fs");
 const path = require("path");
-const XLSX = require("../vendor/xlsx.full.min.js");
+const XLSX = require("../lib/xlsx.full.min.js");
 const core = require("../core.js");
 
 function matrixFrom(file) {
