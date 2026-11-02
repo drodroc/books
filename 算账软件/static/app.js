@@ -125,35 +125,27 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function postForm(path, form, onUpload) {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("POST", path);
-    xhr.upload.onprogress = (event) => {
-      if (!onUpload || !event.lengthComputable || !event.total) return;
-      onUpload(event.loaded / event.total);
-    };
-    xhr.onload = () => {
-      let data = {};
-      try {
-        data = JSON.parse(xhr.responseText || "{}");
-      } catch (error) {
-        reject(new Error("请求失败"));
-        return;
-      }
-      if (xhr.status >= 400 || data.error) reject(new Error(data.error || "请求失败"));
-      else resolve(data);
-    };
-    xhr.onerror = () => reject(new Error("连接中断了，请再试一次"));
-    xhr.send(form);
-  });
+function isNetworkError(error) {
+  const message = String((error && error.message) || error || "");
+  return message === "Failed to fetch" || /NetworkError|Failed to load|连接|中断|网络|ECONNRESET|load failed/i.test(message);
 }
 
 async function pollJob(jobId, floor) {
   const base = floor || 0;
   let shown = base;
+  let failures = 0;
   while (true) {
-    const job = await api(`/api/jobs/${jobId}`);
+    let job;
+    try {
+      job = await api(`/api/jobs/${jobId}`);
+      failures = 0;
+    } catch (error) {
+      failures += 1;
+      if (!isNetworkError(error) || failures > 30) throw error;
+      setBusy(shown, "还在处理，正在重新连接…");
+      await sleep(400);
+      continue;
+    }
     const next = Math.max(shown, base + (100 - base) * ((Number(job.progress) || 0) / 100));
     shown = next;
     setBusy(next, job.message || "正在处理…");
@@ -536,16 +528,26 @@ async function previewFile(file, intent) {
   showBusy(title, "正在把表格送进软件…", 3);
   const form = new FormData();
   form.append("file", file);
+  let creep = 3;
+  let sending = true;
+  const timer = setInterval(() => {
+    if (!sending) return;
+    creep = Math.min(15, creep + 1);
+    setBusy(creep, "正在把表格送进软件…");
+  }, 400);
   try {
-    const started = await postForm("/api/preview", form, (ratio) => {
-      setBusy(Math.max(3, Math.round(ratio * 16)), "正在把表格送进软件…");
-    });
+    const started = await api("/api/preview", { method: "POST", body: form });
+    sending = false;
+    clearInterval(timer);
     const info = await pollJob(started.job_id, 16);
     hideBusy();
     openPreview(info, intent);
   } catch (error) {
     hideBusy();
-    toast(error.message, true);
+    toast(isNetworkError(error) ? "表格没送完，请再选一次。黑窗口不要关。" : error.message, true);
+  } finally {
+    sending = false;
+    clearInterval(timer);
   }
 }
 

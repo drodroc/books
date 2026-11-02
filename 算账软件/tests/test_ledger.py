@@ -1,8 +1,13 @@
 # -*- coding: utf-8 -*-
+import http.client
 import io
+import json
 import shutil
 import tempfile
+import threading
+import time
 import unittest
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import openpyxl
@@ -364,6 +369,84 @@ class LedgerTest(unittest.TestCase):
         self.assertEqual(state["summary"]["confirmed_amt"], 1500)
         self.assertEqual(state["summary"]["month_profit"], 1080)
         self.assertEqual(state["summary"]["unconfirmed_amt"], 400)
+
+    def test_import_job_answers_before_the_next_request(self):
+        import server as app_server
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), app_server.App)
+        port = httpd.server_address[1]
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+
+        data = make_xlsx([("export", [
+            ORDER_HEADERS,
+            ["A1", "夹爪", 10, 2, "红", "", 20, 20, "没有申请退款", "", "2026-10-02", "1", "2026-10-20"],
+            ["A2", "夹爪", 10, 1, "红", "", 10, 10, "没有申请退款", "", "2026-10-03", "1", ""],
+        ])])
+        boundary = "----ledgertest"
+        body = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="收益.xlsx"\r\n'
+            f"Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\r\n\r\n"
+        ).encode() + data + f"\r\n--{boundary}--\r\n".encode()
+
+        def request(method, path, payload=None, headers=None):
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+            conn.request(method, path, body=payload, headers=headers or {})
+            resp = conn.getresponse()
+            raw = resp.read()
+            info = {"status": resp.status, "connection": resp.getheader("Connection"), "body": raw}
+            conn.close()
+            return info
+
+        preview = request("POST", "/api/preview", body, {
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Connection": "keep-alive",
+        })
+        self.assertEqual(preview["status"], 200)
+        self.assertEqual(preview["connection"], "close")
+        started = json.loads(preview["body"])
+        self.assertTrue(started.get("job_id"))
+        # 进度条会立刻再请求。这条不能被上一次导入掐断。
+        state = request("GET", "/api/state?month=2026-10&basis=confirmed")
+        self.assertEqual(state["status"], 200, state["body"][:200])
+
+        info = None
+        for _ in range(50):
+            polled = request("GET", f"/api/jobs/{started['job_id']}", headers={"Connection": "keep-alive"})
+            self.assertEqual(polled["status"], 200, polled["body"][:200])
+            self.assertEqual(polled["connection"], "close")
+            payload = json.loads(polled["body"])
+            if payload.get("done"):
+                self.assertFalse(payload.get("error"), payload.get("error"))
+                info = payload["result"]
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(info)
+        self.assertEqual(info["kind"], "orders")
+
+        commit = request("POST", "/api/commit", json.dumps({
+            "token": info["token"],
+            "kind": "orders",
+            "month": "2026-10",
+        }).encode(), {"Content-Type": "application/json", "Connection": "keep-alive"})
+        self.assertEqual(commit["status"], 200)
+        self.assertEqual(commit["connection"], "close")
+        commit_job = json.loads(commit["body"])["job_id"]
+        result = None
+        for _ in range(50):
+            polled = request("GET", f"/api/jobs/{commit_job}")
+            payload = json.loads(polled["body"])
+            if payload.get("done"):
+                self.assertFalse(payload.get("error"), payload.get("error"))
+                result = payload["result"]
+                break
+            time.sleep(0.05)
+        self.assertEqual(result["inserted"], 2)
+        saved = ledger.build_state(self.conn, "2026-10")
+        self.assertEqual(saved["summary"]["confirmed_qty"], 2)
+        self.assertEqual(saved["summary"]["unconfirmed_qty"], 1)
 
 
 if __name__ == "__main__":
