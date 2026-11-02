@@ -1,0 +1,453 @@
+# -*- coding: utf-8 -*-
+import http.client
+import io
+import json
+import shutil
+import tempfile
+import threading
+import time
+import unittest
+from http.server import ThreadingHTTPServer
+from pathlib import Path
+
+import openpyxl
+
+import ledger
+
+
+ORDER_HEADERS = [
+    "主订单编号", "商品标题", "商品价格", "购买数量", "商品属性", "套餐信息",
+    "买家应付货款", "买家实付金额", "退款状态", "退款金额", "订单付款时间",
+    "商品ID", "确认收货时间",
+]
+
+
+def make_xlsx(sheets):
+    wb = openpyxl.Workbook()
+    first = True
+    for name, rows in sheets:
+        ws = wb.active if first else wb.create_sheet(name)
+        if first:
+            ws.title = name
+            first = False
+        for row in rows:
+            ws.append(row)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+class LedgerTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        ledger.DATA = root / "data"
+        ledger.TMP = ledger.DATA / "tmp"
+        ledger.DB_PATH = ledger.DATA / "ledger.db"
+        self.conn = ledger.connect()
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def import_bytes(self, filename, data, kind, month="", include_costs=True, allow_overlap=False):
+        token, _path = ledger.save_upload(filename, data)
+        return ledger.commit_import(
+            self.conn, token, kind, month, include_costs, None, "", allow_overlap
+        )
+
+    def test_orders_split_confirmed_unconfirmed_and_refund(self):
+        data = make_xlsx([("export", [
+            ORDER_HEADERS,
+            ["A1", "夹爪", 10, 2, "颜色:红", "", 20, 20, "没有申请退款", "无退款申请", "2026-10-02 10:00:00", "1", "2026-10-20 10:00:00"],
+            ["A2", "夹爪", 10, 1, "颜色:红", "", 10, 10, "没有申请退款", "无退款申请", "2026-10-03 10:00:00", "1", ""],
+            ["A3", "夹爪", 10, 4, "颜色:蓝", "", 40, 40, "没有申请退款", "无退款申请", "2026-09-01 10:00:00", "1", "2026-10-08 10:00:00"],
+            ["A4", "夹爪", 10, 3, "颜色:红", "", 30, 30, "退款成功", 30, "2026-10-04 10:00:00", "1", "2026-10-09 10:00:00"],
+            ["A5", "夹爪", 10, 1, "颜色:红", "", 15, 15, "买家已经申请退款，等待卖家同意", 0, "2026-10-05 10:00:00", "1", "2026-10-11 10:00:00"],
+        ])])
+        result = self.import_bytes("收益.xlsx", data, "orders")
+        self.assertEqual(result["inserted"], 5)
+        state = ledger.build_state(self.conn, "2026-10", "confirmed")
+        product = state["products"][0]
+        self.assertEqual(product["title"], "夹爪")
+        # 红确认 2 件 20 元 + 退款进行中 1 件 15 元；蓝是 9 月付款、10 月确认 4 件 40 元
+        self.assertEqual(product["confirmed_qty"], 7)
+        self.assertEqual(product["confirmed_amt"], 75)
+        self.assertEqual(product["unconfirmed_qty"], 1)
+        self.assertEqual(product["unconfirmed_amt"], 10)
+        self.assertEqual(product["refund_amt"], 30)
+        self.assertEqual(product["pending_count"], 1)
+        red = next(attr for attr in product["attrs"] if attr["attr"] == "颜色:红")
+        blue = next(attr for attr in product["attrs"] if attr["attr"] == "颜色:蓝")
+        self.assertEqual(red["confirmed_qty"], 3)
+        self.assertEqual(red["confirmed_amt"], 35)
+        self.assertEqual(red["unconfirmed_amt"], 10)
+        self.assertEqual(blue["confirmed_amt"], 40)
+        self.assertAlmostEqual(product["progress_qty"], 7 / 8, places=4)
+        self.assertAlmostEqual(product["progress_amt"], 75 / 85, places=4)
+        self.assertIn("收货进度", state["summary"]["sentence"])
+        self.assertIsNone(product["profit"])
+        self.assertIn("还没有支出", state["summary"]["sentence"])
+
+    def test_earlier_unconfirmed_is_listed_without_mixing_into_this_month(self):
+        data = make_xlsx([("export", [
+            ORDER_HEADERS,
+            ["B1", "旧夹爪", 10, 3, "颜色:红", "", 30, 30, "没有申请退款", "", "2026-09-02 10:00:00", "1", ""],
+            ["B2", "新夹爪", 10, 1, "颜色:红", "", 10, 10, "没有申请退款", "", "2026-10-02 10:00:00", "2", ""],
+        ])])
+        self.import_bytes("收益.xlsx", data, "orders")
+        state = ledger.build_state(self.conn, "2026-10")
+        by_title = {item["title"]: item for item in state["products"]}
+        self.assertEqual(by_title["新夹爪"]["unconfirmed_qty"], 1)
+        self.assertEqual(by_title["新夹爪"]["unconfirmed_amt"], 10)
+        self.assertEqual(by_title["新夹爪"]["progress_qty"], 0)
+        self.assertEqual(by_title["旧夹爪"]["confirmed_amt"], 0)
+        self.assertEqual(by_title["旧夹爪"]["unconfirmed_amt"], 0)
+        self.assertEqual(by_title["旧夹爪"]["earlier_qty"], 3)
+        self.assertEqual(by_title["旧夹爪"]["earlier_amt"], 30)
+        self.assertEqual(by_title["旧夹爪"]["status"], "waiting")
+        self.assertEqual(state["summary"]["backlog_amt"], 30)
+
+    def test_reimport_updates_confirmation_without_doubling(self):
+        first = make_xlsx([("export", [
+            ORDER_HEADERS,
+            ["A1", "夹爪", 10, 2, "颜色:红", "", 20, 20, "没有申请退款", "无退款申请", "2026-10-02 10:00:00", "1", ""],
+        ])])
+        self.import_bytes("a.xlsx", first, "orders")
+        second = make_xlsx([("export", [
+            ORDER_HEADERS,
+            ["A1", "夹爪", 10, 2, "颜色:红", "", 20, 20, "没有申请退款", "无退款申请", "2026-10-02 10:00:00", "1", "2026-10-21 12:00:00"],
+        ])])
+        result = self.import_bytes("b.xlsx", second, "orders")
+        self.assertEqual(result["inserted"], 0)
+        self.assertEqual(result["updated"], 1)
+        state = ledger.build_state(self.conn, "2026-10")
+        product = state["products"][0]
+        self.assertEqual(product["confirmed_amt"], 20)
+        self.assertEqual(product["unconfirmed_amt"], 0)
+        self.assertEqual(state["summary"]["confirmed_amt"], 20)
+
+    def test_aggregated_costs_forward_fill_and_profit(self):
+        data = make_xlsx([
+            ("说明", [["项目", "说明"], ["赛道", "新能源赛道"]]),
+            ("按商品属性", [
+                ["商品标题", "商品属性", "成本", "销售数量", "买家实付金额", "占该标题金额", "净利润", "标题销售数量合计", "标题实付合计", "成本", "明细", "利润"],
+                ["示例套件", "颜色:甲", None, 10, 1000, 0.8, None, 12, 1200, 700, "板子", -100],
+                [None, "颜色:乙", None, 2, 200, 0.2, None, None, None, 400, "卡片", None],
+                ["合计", "2 个属性", None, 12, 1200, 1, None, 12, 1200, None, None, None],
+            ]),
+        ])
+        result = self.import_bytes("合并.xlsx", data, "aggregated", "2026-10", True)
+        self.assertEqual(result["inserted"], 2)
+        self.assertEqual(result["costs"], 2)
+        state = ledger.build_state(self.conn, "2026-10")
+        product = state["products"][0]
+        self.assertEqual(product["track"], "新能源赛道")
+        self.assertEqual(product["confirmed_qty"], 12)
+        self.assertEqual(product["confirmed_amt"], 1200)
+        self.assertEqual(product["unconfirmed_amt"], 0)
+        self.assertEqual(product["cost"], 1100)
+        self.assertEqual(product["profit"], 100)
+        self.assertEqual(product["status"], "profit")
+        self.assertEqual(state["summary"]["month_profit"], 100)
+        self.assertEqual(state["summary"]["unallocated_total"], 0)
+        # 再导一次不会加倍
+        again = make_xlsx([
+            ("按商品属性", [
+                ["商品标题", "商品属性", "销售数量", "买家实付金额", "成本", "明细"],
+                ["示例套件", "颜色:甲", 10, 1000, 700, "板子"],
+                [None, "颜色:乙", 2, 200, 400, "卡片"],
+            ]),
+        ])
+        result = self.import_bytes("合并2.xlsx", again, "aggregated", "2026-10", True)
+        self.assertEqual(result["inserted"], 0)
+        state = ledger.build_state(self.conn, "2026-10")
+        self.assertEqual(state["summary"]["confirmed_amt"], 1200)
+        self.assertEqual(state["summary"]["expense_total"], 1100)
+
+    def test_costs_only_does_not_double_revenue(self):
+        self.import_bytes("收益.xlsx", make_xlsx([("export", [
+            ORDER_HEADERS,
+            ["A1", "示例套件", 1, 10, "颜色:甲", "", 1000, 1000, "没有申请退款", "", "2026-10-01", "1", "2026-10-08"],
+        ])]), "orders")
+        merged = make_xlsx([("按商品属性", [
+            ["商品标题", "商品属性", "销售数量", "买家实付金额", "成本", "明细"],
+            ["示例套件", "颜色:甲", 10, 1000, 700, "板子"],
+        ])])
+        token, _path = ledger.save_upload("合并.xlsx", merged)
+        with self.assertRaises(ValueError):
+            ledger.commit_import(self.conn, token, "aggregated", "2026-10", True, None, "", False, False, False)
+        token, _path = ledger.save_upload("合并.xlsx", merged)
+        result = ledger.commit_import(self.conn, token, "aggregated", "2026-10", True, None, "", False, False, True)
+        self.assertEqual(result["inserted"], 0)
+        self.assertEqual(result["costs"], 1)
+        state = ledger.build_state(self.conn, "2026-10")
+        product = state["products"][0]
+        self.assertEqual(product["confirmed_amt"], 1000)
+        self.assertEqual(product["cost"], 700)
+        self.assertEqual(product["profit"], 300)
+
+    def test_drag_split_move_and_month_profit_uses_all_expenses(self):
+        self.import_bytes("收益.xlsx", make_xlsx([("export", [
+            ORDER_HEADERS,
+            ["A1", "甲", 1, 1, "红", "", 800, 800, "没有申请退款", "无退款申请", "2026-10-01", "1", "2026-10-02"],
+            ["A2", "乙", 1, 1, "红", "", 200, 200, "没有申请退款", "无退款申请", "2026-10-01", "2", "2026-10-02"],
+        ])]), "orders")
+        expense_id = ledger.add_expense(self.conn, "木板", 500, "2026-10")
+        ledger.allocate(self.conn, expense_id, "甲", 300)
+        with self.assertRaises(ValueError):
+            ledger.allocate(self.conn, expense_id, "乙", 300)
+        ledger.allocate(self.conn, expense_id, "乙", 200)
+        state = ledger.build_state(self.conn, "2026-10")
+        by_title = {item["title"]: item for item in state["products"]}
+        self.assertEqual(by_title["甲"]["profit"], 500)
+        self.assertEqual(by_title["乙"]["profit"], 0)
+        self.assertEqual(by_title["乙"]["status"], "even")
+        self.assertEqual(state["summary"]["month_profit"], 500)
+        self.assertEqual(state["summary"]["unallocated_total"], 0)
+        alloc = by_title["甲"]["allocations"][0]
+        ledger.update_allocation(self.conn, alloc["id"], amount=100)
+        state = ledger.build_state(self.conn, "2026-10")
+        self.assertEqual(state["summary"]["unallocated_total"], 200)
+        # 整月盈亏仍把没挂出去的成本算进去：1000 - 500 = 500
+        self.assertEqual(state["summary"]["month_profit"], 500)
+        self.assertEqual(state["expenses"][0]["remaining"], 200)
+        ledger.update_allocation(self.conn, alloc["id"], title="乙")
+        state = ledger.build_state(self.conn, "2026-10")
+        by_title = {item["title"]: item for item in state["products"]}
+        self.assertEqual(by_title["乙"]["cost"], 300)
+        self.assertEqual(by_title["甲"]["status"], "unknown")
+
+    def test_split_expense_into_editable_parts(self):
+        expense_id = ledger.add_expense(self.conn, "整单采购", 1000, "2026-10", note="供应商A")
+        ledger.allocate(self.conn, expense_id, "甲", 200)
+        with self.assertRaises(ValueError):
+            ledger.split_expense(self.conn, expense_id, [{"name": "太多", "amount": 900, "note": ""}])
+        result = ledger.split_expense(self.conn, expense_id, [
+            {"name": "板材", "amount": 300, "note": "第一批"},
+            {"name": "螺丝", "amount": 500, "note": "补的"},
+        ])
+        self.assertEqual(len(result["ids"]), 2)
+        self.assertTrue(result["kept"])
+        state = ledger.build_state(self.conn, "2026-10")
+        by_name = {item["name"]: item for item in state["expenses"]}
+        self.assertEqual(by_name["整单采购"]["amount"], 200)
+        self.assertEqual(by_name["整单采购"]["remaining"], 0)
+        self.assertEqual(by_name["板材"]["note"], "第一批")
+        self.assertEqual(by_name["螺丝"]["amount"], 500)
+        self.assertEqual(state["summary"]["expense_total"], 1000)
+        ledger.update_expense(self.conn, result["ids"][0], {
+            "name": "板材改",
+            "amount": 280,
+            "note": "改过备注",
+            "month": "2026-10",
+        })
+        state = ledger.build_state(self.conn, "2026-10")
+        renamed = next(item for item in state["expenses"] if item["id"] == result["ids"][0])
+        self.assertEqual(renamed["name"], "板材改")
+        self.assertEqual(renamed["amount"], 280)
+        self.assertEqual(renamed["note"], "改过备注")
+        self.assertEqual(state["summary"]["expense_total"], 980)
+        other = ledger.add_expense(self.conn, "运费单", 80, "2026-10", note="顺丰")
+        ledger.split_expense(self.conn, other, [
+            {"name": "运费-甲", "amount": 30, "note": "甲的运费"},
+            {"name": "运费-乙", "amount": 50, "note": "乙的运费"},
+        ])
+        names = {item["name"]: item for item in ledger.build_state(self.conn, "2026-10")["expenses"]}
+        self.assertNotIn("运费单", names)
+        self.assertEqual(names["运费-甲"]["note"], "甲的运费")
+        self.assertEqual(names["运费-乙"]["amount"], 50)
+
+    def test_import_reports_progress(self):
+        data = make_xlsx([("export", [
+            ORDER_HEADERS,
+            ["A1", "夹爪", 10, 1, "红", "", 10, 10, "没有申请退款", "", "2026-10-02", "1", "2026-10-20"],
+        ])])
+        token, path = ledger.save_upload("进度.xlsx", data)
+        seen = []
+        info = ledger.analyze_file(path, progress=lambda frac, message: seen.append((frac, message)))
+        self.assertEqual(info["kind"], "orders")
+        self.assertGreaterEqual(seen[-1][0], 0.99)
+        self.assertTrue(any("读" in message for _, message in seen))
+        seen.clear()
+        ledger.commit_import(
+            self.conn, token, "orders", "2026-10", True, None, "", False,
+            progress=lambda frac, message: seen.append((frac, message)),
+        )
+        self.assertGreaterEqual(seen[-1][0], 0.99)
+        self.assertTrue(any("写入" in message for _, message in seen))
+
+    def test_expense_links_by_product_code_and_no_cost_flag(self):
+        self.import_bytes("收益.xlsx", make_xlsx([("export", [
+            ORDER_HEADERS,
+            ["A1", "YDI-D14工创套件", 1, 2, "颜色:甲", "", 100, 100, "没有申请退款", "", "2026-10-01", "9", "2026-10-03"],
+        ])]), "orders")
+        table = make_xlsx([("支出", [
+            ["日期", "项目", "金额", "分类", "备注", "对应商品"],
+            ["2026-10-06", "板子", 40, "加工", "", "YDI-D14"],
+            ["2026-10-07", "胶带", 5, "物料", "", ""],
+            ["2026-10-08", "YDI-D14 补发运费", 8, "物流", "", ""],
+        ])])
+        info_token, path = ledger.save_upload("支出.xlsx", table)
+        info = ledger.analyze_file(path)
+        self.assertEqual(info["kind"], "expenses")
+        result = ledger.commit_import(self.conn, info_token, "expenses", "2026-10", True, None, "", False)
+        self.assertEqual(result["linked"], 1)
+        state = ledger.build_state(self.conn, "2026-10")
+        product = state["products"][0]
+        self.assertEqual(product["cost"], 40)
+        self.assertEqual(product["profit"], 60)
+        self.assertEqual(state["summary"]["unallocated_total"], 13)
+        self.assertEqual(state["summary"]["month_profit"], 47)
+        tape = next(item for item in state["expenses"] if item["name"] == "胶带")
+        self.assertEqual(tape["suggestion"], "")
+        board = next(item for item in state["expenses"] if item["name"] == "板子")
+        self.assertEqual(board["remaining"], 0)
+        freight = next(item for item in state["expenses"] if "补发" in item["name"])
+        self.assertEqual(freight["suggestion"], "YDI-D14工创套件")
+        self.assertEqual(freight["remaining"], 8)
+
+    def test_real_october_files_match_known_totals(self):
+        orders = Path("/home/ubuntu/.cursor/projects/workspace/uploads/____8_9_10__14d7.xlsx")
+        merged = Path("/home/ubuntu/.cursor/projects/workspace/uploads/10________-______a88f.xlsx")
+        if not orders.exists() or not merged.exists():
+            self.skipTest("样例表不在这台机器上")
+        token, path = ledger.save_upload(orders.name, orders.read_bytes())
+        info = ledger.analyze_file(path)
+        self.assertEqual(info["kind"], "orders")
+        self.assertGreater(info["stats"]["rows"], 9000)
+        self.import_bytes(orders.name, orders.read_bytes(), "orders")
+        state = ledger.build_state(self.conn, "2026-10")
+        d14 = next(item for item in state["products"] if item["title"].startswith("YDI-D14"))
+        self.assertEqual(d14["confirmed_qty"], 279)
+        self.assertEqual(d14["confirmed_amt"], 84321.19)
+        confirmed_attrs = [item for item in d14["attrs"] if item["confirmed_amt"] or item["confirmed_qty"]]
+        self.assertEqual(len(confirmed_attrs), 17)
+        self.assertGreater(state["summary"]["unconfirmed_amt"], 0)
+        self.assertGreater(state["summary"]["refund_amt"], 0)
+        # 同一份再导入只更新，不加倍
+        again = self.import_bytes(orders.name, orders.read_bytes(), "orders")
+        self.assertEqual(again["inserted"], 0)
+        self.assertGreater(again["updated"], 0)
+        state = ledger.build_state(self.conn, "2026-10")
+        d14 = next(item for item in state["products"] if item["title"].startswith("YDI-D14"))
+        self.assertEqual(d14["confirmed_amt"], 84321.19)
+
+        # 合并表单独验证成本和利润，换一个库，避免和订单明细加在一起
+        self.conn.close()
+        shutil.rmtree(ledger.DATA)
+        self.conn = ledger.connect()
+        merged_info_token, merged_path = ledger.save_upload(merged.name, merged.read_bytes())
+        merged_info = ledger.analyze_file(merged_path)
+        self.assertEqual(merged_info["kind"], "aggregated")
+        self.assertEqual(merged_info["stats"]["track"], "新能源赛道")
+        self.assertGreater(merged_info["stats"]["cost_rows"], 0)
+        self.import_bytes(merged.name, merged.read_bytes(), "aggregated", "2026-10", True)
+        state = ledger.build_state(self.conn, "2026-10")
+        self.assertEqual(state["summary"]["confirmed_amt"], 282891.63)
+        self.assertEqual(state["summary"]["confirmed_qty"], 6207)
+        d14 = next(item for item in state["products"] if item["title"].startswith("YDI-D14"))
+        self.assertEqual(d14["confirmed_amt"], 84321.19)
+        self.assertEqual(d14["cost"], 90349.86)
+        self.assertEqual(d14["profit"], -6028.67)
+        self.assertEqual(d14["status"], "loss")
+        d12 = next(item for item in state["products"] if item["title"].startswith("YDI-D12"))
+        self.assertEqual(d12["profit"], 14703.25)
+        lamp = next(item for item in state["products"] if item["title"].startswith("YDI-D69"))
+        self.assertEqual(lamp["profit"], -700)
+        self.assertEqual(state["summary"]["unallocated_total"], 0)
+        book = ledger.export_workbook(self.conn, "2026-10")
+        self.assertTrue(book[:2] == b"PK")
+
+    def test_backup_roundtrip(self):
+        ledger.load_demo(self.conn)
+        payload = ledger.backup_data(self.conn)
+        ledger.delete_import(self.conn, payload["imports"][0]["id"])
+        self.assertEqual(ledger.build_state(self.conn, "2099-01")["summary"]["product_count"], 0)
+        ledger.restore_data(self.conn, payload)
+        state = ledger.build_state(self.conn, "2099-01")
+        self.assertEqual(state["summary"]["confirmed_amt"], 1500)
+        self.assertEqual(state["summary"]["month_profit"], 1080)
+        self.assertEqual(state["summary"]["unconfirmed_amt"], 400)
+
+    def test_import_job_answers_before_the_next_request(self):
+        import server as app_server
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), app_server.App)
+        port = httpd.server_address[1]
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+
+        data = make_xlsx([("export", [
+            ORDER_HEADERS,
+            ["A1", "夹爪", 10, 2, "红", "", 20, 20, "没有申请退款", "", "2026-10-02", "1", "2026-10-20"],
+            ["A2", "夹爪", 10, 1, "红", "", 10, 10, "没有申请退款", "", "2026-10-03", "1", ""],
+        ])])
+        boundary = "----ledgertest"
+        body = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="收益.xlsx"\r\n'
+            f"Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\r\n\r\n"
+        ).encode() + data + f"\r\n--{boundary}--\r\n".encode()
+
+        def request(method, path, payload=None, headers=None):
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+            conn.request(method, path, body=payload, headers=headers or {})
+            resp = conn.getresponse()
+            raw = resp.read()
+            info = {"status": resp.status, "connection": resp.getheader("Connection"), "body": raw}
+            conn.close()
+            return info
+
+        preview = request("POST", "/api/preview", body, {
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Connection": "keep-alive",
+        })
+        self.assertEqual(preview["status"], 200)
+        self.assertEqual(preview["connection"], "close")
+        started = json.loads(preview["body"])
+        self.assertTrue(started.get("job_id"))
+        # 进度条会立刻再请求。这条不能被上一次导入掐断。
+        state = request("GET", "/api/state?month=2026-10&basis=confirmed")
+        self.assertEqual(state["status"], 200, state["body"][:200])
+
+        info = None
+        for _ in range(50):
+            polled = request("GET", f"/api/jobs/{started['job_id']}", headers={"Connection": "keep-alive"})
+            self.assertEqual(polled["status"], 200, polled["body"][:200])
+            self.assertEqual(polled["connection"], "close")
+            payload = json.loads(polled["body"])
+            if payload.get("done"):
+                self.assertFalse(payload.get("error"), payload.get("error"))
+                info = payload["result"]
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(info)
+        self.assertEqual(info["kind"], "orders")
+
+        commit = request("POST", "/api/commit", json.dumps({
+            "token": info["token"],
+            "kind": "orders",
+            "month": "2026-10",
+        }).encode(), {"Content-Type": "application/json", "Connection": "keep-alive"})
+        self.assertEqual(commit["status"], 200)
+        self.assertEqual(commit["connection"], "close")
+        commit_job = json.loads(commit["body"])["job_id"]
+        result = None
+        for _ in range(50):
+            polled = request("GET", f"/api/jobs/{commit_job}")
+            payload = json.loads(polled["body"])
+            if payload.get("done"):
+                self.assertFalse(payload.get("error"), payload.get("error"))
+                result = payload["result"]
+                break
+            time.sleep(0.05)
+        self.assertEqual(result["inserted"], 2)
+        saved = ledger.build_state(self.conn, "2026-10")
+        self.assertEqual(saved["summary"]["confirmed_qty"], 2)
+        self.assertEqual(saved["summary"]["unconfirmed_qty"], 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
