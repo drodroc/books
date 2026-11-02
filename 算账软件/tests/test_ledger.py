@@ -78,8 +78,30 @@ class LedgerTest(unittest.TestCase):
         self.assertEqual(red["confirmed_amt"], 35)
         self.assertEqual(red["unconfirmed_amt"], 10)
         self.assertEqual(blue["confirmed_amt"], 40)
+        self.assertAlmostEqual(product["progress_qty"], 7 / 8, places=4)
+        self.assertAlmostEqual(product["progress_amt"], 75 / 85, places=4)
+        self.assertIn("收货进度", state["summary"]["sentence"])
         self.assertIsNone(product["profit"])
         self.assertIn("还没有支出", state["summary"]["sentence"])
+
+    def test_earlier_unconfirmed_is_listed_without_mixing_into_this_month(self):
+        data = make_xlsx([("export", [
+            ORDER_HEADERS,
+            ["B1", "旧夹爪", 10, 3, "颜色:红", "", 30, 30, "没有申请退款", "", "2026-09-02 10:00:00", "1", ""],
+            ["B2", "新夹爪", 10, 1, "颜色:红", "", 10, 10, "没有申请退款", "", "2026-10-02 10:00:00", "2", ""],
+        ])])
+        self.import_bytes("收益.xlsx", data, "orders")
+        state = ledger.build_state(self.conn, "2026-10")
+        by_title = {item["title"]: item for item in state["products"]}
+        self.assertEqual(by_title["新夹爪"]["unconfirmed_qty"], 1)
+        self.assertEqual(by_title["新夹爪"]["unconfirmed_amt"], 10)
+        self.assertEqual(by_title["新夹爪"]["progress_qty"], 0)
+        self.assertEqual(by_title["旧夹爪"]["confirmed_amt"], 0)
+        self.assertEqual(by_title["旧夹爪"]["unconfirmed_amt"], 0)
+        self.assertEqual(by_title["旧夹爪"]["earlier_qty"], 3)
+        self.assertEqual(by_title["旧夹爪"]["earlier_amt"], 30)
+        self.assertEqual(by_title["旧夹爪"]["status"], "waiting")
+        self.assertEqual(state["summary"]["backlog_amt"], 30)
 
     def test_reimport_updates_confirmation_without_doubling(self):
         first = make_xlsx([("export", [

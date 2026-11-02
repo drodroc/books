@@ -197,6 +197,13 @@ def money(value):
     return round(float(value or 0) + 1e-10, 2)
 
 
+def progress_ratio(done, waiting):
+    total = (done or 0) + (waiting or 0)
+    if total <= 0:
+        return None
+    return round((done or 0) / total, 6)
+
+
 def parse_dt(value):
     if value is None or value == "":
         return None
@@ -1096,6 +1103,8 @@ def build_state(conn, month, basis="confirmed"):
                 "confirmed_amt": 0.0,
                 "unconfirmed_qty": 0.0,
                 "unconfirmed_amt": 0.0,
+                "earlier_qty": 0.0,
+                "earlier_amt": 0.0,
                 "refund_qty": 0.0,
                 "refund_amt": 0.0,
                 "pending_count": 0,
@@ -1163,6 +1172,18 @@ def build_state(conn, month, basis="confirmed"):
              AND refund_status != ?""",
         (month, REFUND_DONE),
     ).fetchone()
+    for row in conn.execute(
+        """SELECT title, COALESCE(SUM(qty),0) qty, COALESCE(SUM(paid),0) amt
+           FROM revenue_lines
+           WHERE pay_month != '' AND pay_month < ?
+             AND (confirm_month IS NULL OR confirm_month = '')
+             AND refund_status != ?
+           GROUP BY title""",
+        (month, REFUND_DONE),
+    ):
+        prod = bucket(row["title"])
+        prod["earlier_qty"] = row["qty"] or 0
+        prod["earlier_amt"] = row["amt"] or 0
 
     meta = {r["title"]: r for r in conn.execute("SELECT title, track, note FROM product_meta")}
     flags = {
@@ -1220,6 +1241,10 @@ def build_state(conn, month, basis="confirmed"):
         prod["confirmed_amt"] = money(prod["confirmed_amt"])
         prod["unconfirmed_qty"] = money(prod["unconfirmed_qty"])
         prod["unconfirmed_amt"] = money(prod["unconfirmed_amt"])
+        prod["earlier_qty"] = money(prod["earlier_qty"])
+        prod["earlier_amt"] = money(prod["earlier_amt"])
+        prod["progress_qty"] = progress_ratio(prod["confirmed_qty"], prod["unconfirmed_qty"])
+        prod["progress_amt"] = progress_ratio(prod["confirmed_amt"], prod["unconfirmed_amt"])
         prod["refund_qty"] = money(prod["refund_qty"])
         prod["refund_amt"] = money(prod["refund_amt"])
         prod["pending_amt"] = money(prod["pending_amt"])
@@ -1227,7 +1252,10 @@ def build_state(conn, month, basis="confirmed"):
         prod["cost"] = cost
         revenue = prod["confirmed_amt"] + (prod["unconfirmed_amt"] if basis == "all" else 0)
         known = cost > 0 or prod["no_cost"]
-        if revenue == 0 and cost == 0:
+        if revenue == 0 and cost == 0 and prod["earlier_amt"]:
+            prod["profit"] = None
+            prod["status"] = "waiting"
+        elif revenue == 0 and cost == 0:
             prod["profit"] = 0
             prod["status"] = "none"
         elif not known:
@@ -1251,6 +1279,8 @@ def build_state(conn, month, basis="confirmed"):
             attr["confirmed_qty"] = money(attr["confirmed_qty"])
             attr["unconfirmed_amt"] = money(attr["unconfirmed_amt"])
             attr["unconfirmed_qty"] = money(attr["unconfirmed_qty"])
+            attr["progress_qty"] = progress_ratio(attr["confirmed_qty"], attr["unconfirmed_qty"])
+            attr["progress_amt"] = progress_ratio(attr["confirmed_amt"], attr["unconfirmed_amt"])
             base_amt = attr["confirmed_amt"] + (attr["unconfirmed_amt"] if basis == "all" else 0)
             share = (base_amt / revenue) if revenue else 0
             attr["share"] = round(share, 6)
@@ -1263,7 +1293,7 @@ def build_state(conn, month, basis="confirmed"):
         attr_rows.sort(key=lambda a: (a["confirmed_amt"] + a["unconfirmed_amt"]), reverse=True)
         prod["attrs"] = attr_rows
         prod["attr_count"] = len(attr_rows)
-        if prod["confirmed_amt"] or prod["unconfirmed_amt"] or prod["allocations"] or prod["refund_amt"]:
+        if prod["confirmed_amt"] or prod["unconfirmed_amt"] or prod["earlier_amt"] or prod["allocations"] or prod["refund_amt"]:
             product_list.append(prod)
     product_list.sort(key=lambda p: p["confirmed_amt"], reverse=True)
 
@@ -1289,6 +1319,8 @@ def build_state(conn, month, basis="confirmed"):
         "confirmed_amt": confirmed_amt,
         "unconfirmed_qty": unconfirmed_qty,
         "unconfirmed_amt": unconfirmed_amt,
+        "progress_qty": progress_ratio(confirmed_qty, unconfirmed_qty),
+        "progress_amt": progress_ratio(confirmed_amt, unconfirmed_amt),
         "refund_qty": refund_qty,
         "refund_amt": refund_amt,
         "pending_count": pending_count,
@@ -1337,6 +1369,7 @@ def conclusion_sentence(summary):
         return (
             f"{month} 已有{basis_text} { _fmt(revenue) }。"
             "还没有支出，所以还不能判断这个月赚没有。导入支出后，把每一笔拖到对应的商品上。"
+            + _progress_clause(summary)
         )
     profit = summary["month_profit"]
     if summary["unknown_count"]:
@@ -1358,7 +1391,26 @@ def conclusion_sentence(summary):
         text += f" 其中 { _fmt(summary['unallocated_total']) } 支出还没挂到商品。整月盈亏已经扣掉了，但这笔成本还没算进任何一个商品。"
     if summary["pending_count"]:
         text += f" 另有 {summary['pending_count']} 笔退款没完结（{ _fmt(summary['pending_amt']) }），目前仍算在收入里。"
+    text += _progress_clause(summary)
     return text
+
+
+def _progress_clause(summary):
+    if summary.get("progress_qty") is None:
+        return ""
+    percent = summary["progress_qty"] * 100
+    return (
+        f" 收货进度 {percent:.1f}%"
+        f"（确认 {_qty_text(summary['confirmed_qty'])} 件、{_fmt(summary['confirmed_amt'])}，"
+        f"未确认 {_qty_text(summary['unconfirmed_qty'])} 件、{_fmt(summary['unconfirmed_amt'])}）。"
+    )
+
+
+def _qty_text(value):
+    number = float(value or 0)
+    if abs(number - round(number)) < 0.001:
+        return f"{int(round(number)):,}"
+    return f"{number:,.2f}"
 
 
 def _fmt(value):
@@ -1467,6 +1519,7 @@ def _write_summary_sheet(ws, state):
         ("确认收货金额", summary["confirmed_amt"]),
         ("未确认数量", summary["unconfirmed_qty"]),
         ("未确认金额", summary["unconfirmed_amt"]),
+        ("收货进度", f"{summary['progress_qty'] * 100:.1f}%" if summary["progress_qty"] is not None else "—"),
         ("退款成功（已剔除）", summary["refund_amt"]),
         ("支出合计", summary["expense_total"]),
         ("已挂到商品", summary["allocated_total"]),
@@ -1486,39 +1539,44 @@ def _write_summary_sheet(ws, state):
 
 
 def _write_product_sheet(ws, state):
-    headers = ["商品标题", "赛道", "确认数量", "确认金额", "未确认数量", "未确认金额", "退款金额", "已挂成本", "利润", "盈亏", "成本明细"]
+    headers = ["商品标题", "赛道", "确认数量", "确认金额", "未确认数量", "未确认金额", "收货进度", "更早未确认数量", "更早未确认金额", "退款金额", "已挂成本", "利润", "盈亏", "成本明细"]
     _write_header(ws, headers)
     for row_index, prod in enumerate(state["products"], 2):
         detail = "；".join(f"{a['name']} {a['amount']:.2f}" for a in prod["allocations"])
-        status = {"profit": "赚钱", "loss": "亏损", "even": "打平", "unknown": "成本未挂", "none": "无收入"}[prod["status"]]
+        status = {"profit": "赚钱", "loss": "亏损", "even": "打平", "unknown": "成本未挂", "none": "无收入", "waiting": "待收货"}[prod["status"]]
         values = [
             prod["title"], prod["track"], prod["confirmed_qty"], prod["confirmed_amt"],
-            prod["unconfirmed_qty"], prod["unconfirmed_amt"], prod["refund_amt"], prod["cost"],
+            prod["unconfirmed_qty"], prod["unconfirmed_amt"],
+            prod["progress_qty"] if prod["progress_qty"] is not None else "",
+            prod["earlier_qty"], prod["earlier_amt"],
+            prod["refund_amt"], prod["cost"],
             prod["profit"] if prod["profit"] is not None else "", status, detail,
         ]
         for col, value in enumerate(values, 1):
             cell = ws.cell(row_index, col, value)
             cell.font = Font(name="微软雅黑", size=10)
             if isinstance(value, float):
-                cell.number_format = '#,##0.00'
+                cell.number_format = '0.00%' if col == 7 else '#,##0.00'
         if prod["status"] == "loss":
-            ws.cell(row_index, 9).font = Font(name="微软雅黑", color="A33B24", bold=True)
+            ws.cell(row_index, 12).font = Font(name="微软雅黑", color="A33B24", bold=True)
         elif prod["status"] == "profit":
-            ws.cell(row_index, 9).font = Font(name="微软雅黑", color="2D6A3F", bold=True)
-    widths = [42, 14, 12, 14, 12, 14, 12, 12, 12, 12, 48]
+            ws.cell(row_index, 12).font = Font(name="微软雅黑", color="2D6A3F", bold=True)
+    widths = [42, 14, 12, 14, 12, 14, 12, 16, 16, 12, 12, 12, 12, 48]
     for index, width in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(index)].width = width
 
 
 def _write_attr_sheet(ws, state):
-    headers = ["商品标题", "商品属性", "确认数量", "确认金额", "未确认数量", "未确认金额", "占该商品金额", "直接成本", "按金额估算成本", "估算利润"]
+    headers = ["商品标题", "商品属性", "确认数量", "确认金额", "未确认数量", "未确认金额", "收货进度", "占该商品金额", "直接成本", "按金额估算成本", "估算利润"]
     _write_header(ws, headers)
     row_index = 2
     for prod in state["products"]:
         for attr in prod["attrs"]:
             values = [
                 prod["title"], attr["attr"], attr["confirmed_qty"], attr["confirmed_amt"],
-                attr["unconfirmed_qty"], attr["unconfirmed_amt"], attr["share"],
+                attr["unconfirmed_qty"], attr["unconfirmed_amt"],
+                attr["progress_qty"] if attr["progress_qty"] is not None else "",
+                attr["share"],
                 attr["direct_cost"], attr["estimated_cost"] if attr["estimated_cost"] is not None else "",
                 attr["estimated_profit"] if attr["estimated_profit"] is not None else "",
             ]
@@ -1526,9 +1584,9 @@ def _write_attr_sheet(ws, state):
                 cell = ws.cell(row_index, col, value)
                 cell.font = Font(name="微软雅黑", size=10)
                 if isinstance(value, float):
-                    cell.number_format = '0.00%' if col == 7 else '#,##0.00'
+                    cell.number_format = '0.00%' if col in (7, 8) else '#,##0.00'
             row_index += 1
-    widths = [42, 46, 12, 14, 12, 14, 14, 12, 18, 14]
+    widths = [42, 46, 12, 14, 12, 14, 12, 14, 12, 18, 14]
     for index, width in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(index)].width = width
 

@@ -155,7 +155,7 @@ button { cursor: pointer; }
 .sentence { margin: 0; line-height: 1.65; }
 .metrics {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 8px;
   margin-top: 14px;
 }
@@ -168,6 +168,18 @@ button { cursor: pointer; }
 .metric strong { display: block; margin-top: 3px; font-variant-numeric: tabular-nums; font-size: 16px; }
 .metric em { font-style: normal; color: var(--soft); font-size: 12px; }
 .metric.warn strong { color: var(--cinnabar); }
+.month-progress {
+  height: 8px;
+  margin-top: 12px;
+  background: #efe4d0;
+  border-radius: 99px;
+  overflow: hidden;
+}
+.month-progress i {
+  display: block;
+  height: 100%;
+  background: var(--teal);
+}
 
 main {
   display: grid;
@@ -212,13 +224,26 @@ main {
 .product { border-bottom: 1px solid var(--line); }
 .product:last-child { border-bottom: 0; }
 .product.drop { background: #e7f3f1; }
+.sheet-cols {
+  display: grid;
+  grid-template-columns: 22px minmax(150px, 1.45fr) 68px 104px 80px 108px minmax(92px, 0.9fr) 84px 96px;
+  gap: 6px 8px;
+  align-items: center;
+}
+.plist-head {
+  padding: 8px 12px;
+  color: var(--soft);
+  font-size: 12px;
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 118px;
+  background: #fffaf1;
+  z-index: 4;
+}
+.plist-head span:nth-child(n + 3) { text-align: right; }
 .prow {
   width: 100%;
-  display: grid;
-  grid-template-columns: 22px minmax(180px, 1.5fr) repeat(4, minmax(92px, 0.7fr));
-  gap: 8px;
-  align-items: center;
-  padding: 12px 12px;
+  padding: 12px;
   background: transparent;
   border: 0;
   text-align: left;
@@ -232,6 +257,19 @@ main {
 .num.profit strong { color: var(--moss); }
 .num.loss strong { color: var(--cinnabar); }
 .num.unknown strong { color: var(--gold); }
+.num.wait strong { color: var(--gold); }
+.num .label { display: none; }
+.earlier { display: block; color: var(--gold); }
+.num.progress em {
+  display: block;
+  height: 6px;
+  margin-top: 4px;
+  background: #efe4d0;
+  border-radius: 99px;
+  overflow: hidden;
+}
+.num.progress em i { display: block; height: 100%; background: var(--teal); }
+.num.progress small { color: var(--soft); font-size: 11px; }
 .pbody { padding: 0 14px 14px 42px; }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
 .chip {
@@ -363,7 +401,10 @@ body.is-dragging .prow { outline: 1px dashed #c9b89a; outline-offset: -6px; }
   .metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   main { grid-template-columns: 1fr; }
   aside { position: static; max-height: none; }
-  .prow { grid-template-columns: 22px minmax(0, 1fr); }
-  .prow .num { text-align: left; }
+  .plist-head { display: none; }
+  .prow.sheet-cols { grid-template-columns: 22px minmax(0, 1fr); }
+  .prow .num { text-align: left; grid-column: 2; }
+  .prow .num .label { display: block; }
+  .prow .pname { grid-column: 2; }
   .toolbar { top: 118px; }
 }

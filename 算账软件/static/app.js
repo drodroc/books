@@ -146,7 +146,17 @@ function openModal(html, ready) {
 }
 
 function statusText(status) {
-  return { profit: "赚钱", loss: "亏损", even: "打平", unknown: "成本未挂", none: "无收入" }[status] || "";
+  return { profit: "赚钱", loss: "亏损", even: "打平", unknown: "成本未挂", none: "无收入", waiting: "待收货" }[status] || "";
+}
+
+function progressCell(qtyRatio, confirmedQty, unconfirmedQty) {
+  const total = (Number(confirmedQty) || 0) + (Number(unconfirmedQty) || 0);
+  if (qtyRatio == null || total <= 0) {
+    return `<span class="num progress" data-label="收货进度"><span class="label">收货进度</span><strong>—</strong></span>`;
+  }
+  const pct = Math.round(qtyRatio * 1000) / 10;
+  const width = Math.max(0, Math.min(100, pct));
+  return `<span class="num progress" data-label="收货进度"><span class="label">收货进度</span><strong>${pct.toFixed(1)}%</strong><em><i style="width:${width}%"></i></em><small>${qty(confirmedQty)} / ${qty(total)} 件</small></span>`;
 }
 
 function filteredProducts() {
@@ -158,7 +168,7 @@ function filteredProducts() {
   if (status === "loss") rows = rows.filter((row) => row.status === "loss");
   if (status === "profit") rows = rows.filter((row) => row.status === "profit");
   if (status === "unknown") rows = rows.filter((row) => row.status === "unknown");
-  if (status === "open") rows = rows.filter((row) => row.unconfirmed_amt > 0);
+  if (status === "open") rows = rows.filter((row) => row.unconfirmed_amt > 0 || row.earlier_amt > 0);
   if (q) {
     rows = rows.filter((row) => {
       const blob = [
@@ -174,6 +184,12 @@ function filteredProducts() {
   const profitKey = (row) => (row.profit == null ? null : row.profit);
   rows.sort((a, b) => {
     if (sort === "name") return a.title.localeCompare(b.title, "zh");
+    if (sort === "unconfirmed") return (b.unconfirmed_amt + b.earlier_amt) - (a.unconfirmed_amt + a.earlier_amt);
+    if (sort === "progress") {
+      const ap = a.progress_qty == null ? 2 : a.progress_qty;
+      const bp = b.progress_qty == null ? 2 : b.progress_qty;
+      return ap - bp || b.unconfirmed_amt - a.unconfirmed_amt;
+    }
     if (sort === "unknown") return Number(b.status === "unknown") - Number(a.status === "unknown") || b.confirmed_amt - a.confirmed_amt;
     if (sort === "profit" || sort === "loss") {
       const av = profitKey(a);
@@ -229,14 +245,16 @@ function renderSummary() {
         <h2>${esc(monthLabel(summary.month))} · ${esc(title)}</h2>
         <p class="sentence">${esc(summary.sentence)}</p>
         <div class="metrics">
-          <div class="metric"><span>确认收货</span><strong>${yuan(summary.confirmed_amt)}</strong><em>${qty(summary.confirmed_qty)} 件</em></div>
-          <div class="metric"><span>未确认收货</span><strong>${yuan(summary.unconfirmed_amt)}</strong><em>${qty(summary.unconfirmed_qty)} 件</em></div>
+          <div class="metric"><span>确认数量</span><strong>${qty(summary.confirmed_qty)} 件</strong><em>金额 ${yuan(summary.confirmed_amt)}</em></div>
+          <div class="metric"><span>未确认数量</span><strong>${qty(summary.unconfirmed_qty)} 件</strong><em>金额 ${yuan(summary.unconfirmed_amt)}</em></div>
+          <div class="metric"><span>收货进度</span><strong>${summary.progress_qty == null ? "—" : (summary.progress_qty * 100).toFixed(1) + "%"}</strong><em>按件数，金额进度 ${summary.progress_amt == null ? "—" : (summary.progress_amt * 100).toFixed(1) + "%"}</em></div>
           <div class="metric"><span>退款成功，已剔除</span><strong>${yuan(summary.refund_amt)}</strong><em>${qty(summary.refund_qty)} 件</em></div>
           <div class="metric"><span>支出合计</span><strong>${summary.has_expenses ? yuan(summary.expense_total) : "—"}</strong><em>已挂到商品 ${yuan(summary.allocated_total)}</em></div>
           <div class="metric ${summary.unallocated_total > 0 ? "warn" : ""}"><span>还没挂到商品</span><strong>${summary.has_expenses ? yuan(summary.unallocated_total) : "—"}</strong><em>整月盈亏已经扣过</em></div>
           <div class="metric"><span>商品</span><strong>${summary.product_count}</strong><em>赚 ${summary.profit_count} · 亏 ${summary.loss_count} · 未挂 ${summary.unknown_count}</em></div>
         </div>
-        ${summary.backlog_amt > 0 ? `<p class="note">以前付款、到这个月还没确认收货的还有 ${yuan(summary.backlog_amt)}（${qty(summary.backlog_qty)} 件）。它们留在付款那个月的「未确认」里，没有算进这个月。</p>` : ""}
+        <div class="month-progress" aria-hidden="true"><i style="width:${summary.progress_qty == null ? 0 : Math.max(0, Math.min(100, summary.progress_qty * 100))}%"></i></div>
+        ${summary.backlog_amt > 0 ? `<p class="note">更早月份付了款、到现在还没确认收货的还有 ${qty(summary.backlog_qty)} 件、${yuan(summary.backlog_amt)}。这些写在对应商品名字下面，没有算进上面这个月的未确认。</p>` : ""}
       </div>
     </div>`;
 }
@@ -270,7 +288,13 @@ function renderProducts() {
     $("#products").innerHTML = `<div class="empty">没有符合筛选的商品。</div>`;
     return;
   }
-  $("#products").innerHTML = rows.map((product) => productCard(product)).join("");
+  $("#products").innerHTML = `
+    <div class="plist-head sheet-cols">
+      <span></span><span>商品</span>
+      <span>确认数量</span><span>确认金额</span>
+      <span>未确认数量</span><span>未确认金额</span>
+      <span>收货进度</span><span>成本</span><span>盈亏</span>
+    </div>` + rows.map((product) => productCard(product)).join("");
 }
 
 function productCard(product) {
@@ -278,18 +302,25 @@ function productCard(product) {
   const tone = product.status === "profit" ? "profit" : product.status === "loss" ? "loss" : product.status === "unknown" ? "unknown" : "";
   const profit = product.profit == null ? "成本未挂" : yuan(product.profit);
   const names = product.allocations.slice(0, 3).map((alloc) => alloc.name).join("、");
+  const earlier = product.earlier_amt > 0
+    ? `<small class="earlier">更早仍未确认 ${qty(product.earlier_qty)} 件 · ${yuan(product.earlier_amt)}</small>`
+    : "";
   return `
     <article class="product" data-drop="${enc(product.title)}">
-      <button type="button" class="prow" data-toggle="${enc(product.title)}">
+      <button type="button" class="prow sheet-cols" data-toggle="${enc(product.title)}">
         <span class="twist">${opened ? "▾" : "▸"}</span>
         <span class="pname">
           <b>${esc(product.title)}</b>
           <small>${product.track ? esc(product.track) + " · " : ""}${product.attr_count} 个属性${names ? " · " + esc(names) : ""}</small>
+          ${earlier}
         </span>
-        <span class="num"><span>确认收货</span><strong>${yuan(product.confirmed_amt)}</strong><em>${qty(product.confirmed_qty)} 件</em></span>
-        <span class="num"><span>未确认</span><strong>${yuan(product.unconfirmed_amt)}</strong><em>${qty(product.unconfirmed_qty)} 件</em></span>
-        <span class="num"><span>已挂成本</span><strong>${product.cost ? yuan(product.cost) : "—"}</strong><em>${product.refund_amt ? "退款 " + yuan(product.refund_amt) : ""}</em></span>
-        <span class="num ${tone}"><span>${esc(statusText(product.status))}</span><strong>${esc(profit)}</strong></span>
+        <span class="num" data-label="确认数量"><span class="label">确认数量</span><strong>${qty(product.confirmed_qty)}</strong></span>
+        <span class="num" data-label="确认金额"><span class="label">确认金额</span><strong>${yuan(product.confirmed_amt)}</strong></span>
+        <span class="num wait" data-label="未确认数量"><span class="label">未确认数量</span><strong>${qty(product.unconfirmed_qty)}</strong></span>
+        <span class="num wait" data-label="未确认金额"><span class="label">未确认金额</span><strong>${yuan(product.unconfirmed_amt)}</strong></span>
+        ${progressCell(product.progress_qty, product.confirmed_qty, product.unconfirmed_qty)}
+        <span class="num" data-label="成本"><span class="label">成本</span><strong>${product.cost ? yuan(product.cost) : "—"}</strong><em>${product.refund_amt ? "退款 " + yuan(product.refund_amt) : ""}</em></span>
+        <span class="num ${tone}" data-label="盈亏"><span class="label">${esc(statusText(product.status))}</span><strong>${esc(profit)}</strong></span>
       </button>
       ${opened ? productBody(product) : ""}
     </article>`;
@@ -310,6 +341,7 @@ function productBody(product) {
       <td>${yuan(attr.confirmed_amt)}</td>
       <td>${qty(attr.unconfirmed_qty)}</td>
       <td>${yuan(attr.unconfirmed_amt)}</td>
+      <td>${attr.progress_qty == null ? "—" : (attr.progress_qty * 100).toFixed(1) + "%"}</td>
       <td>${(attr.share * 100).toFixed(1)}%</td>
       <td>${attr.estimated_cost == null ? "—" : yuan(attr.estimated_cost)}</td>
       <td>${attr.estimated_profit == null ? "—" : yuan(attr.estimated_profit)}</td>
@@ -329,7 +361,7 @@ function productBody(product) {
       <table class="attrs">
         <thead>
           <tr>
-            <th>商品属性</th><th>确认数量</th><th>确认金额</th><th>未确认数量</th><th>未确认金额</th><th>占该商品</th><th>估算成本</th><th>估算利润</th>
+            <th>商品属性</th><th>确认数量</th><th>确认金额</th><th>未确认数量</th><th>未确认金额</th><th>收货进度</th><th>占该商品</th><th>估算成本</th><th>估算利润</th>
           </tr>
         </thead>
         <tbody>${attrs}</tbody>

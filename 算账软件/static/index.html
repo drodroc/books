@@ -35,7 +35,7 @@
   </header>
 
   <p class="rules">
-    同一个商品、同一种商品属性的数量和金额会加在一起。确认收货时间在这个月的，算本月收入；这个月付了款但还没有确认收货的，单独列出来，默认不拿来算赚亏。退款成功不计入。右边每一笔支出拖到对应商品上，收入减去这些成本，就是这个商品赚的钱。
+    同一个商品、同一种商品属性的数量和金额会加在一起。每一行同时列出：这个月确认收货的数量和金额，以及这个月付了款但还没有确认收货的数量和金额。收货进度是确认数量占这两部分合计的比例。退款成功不计入。右边每一笔支出拖到对应商品上，收入减去这些成本，就是这个商品赚的钱。默认只用确认收货算盈亏。
   </p>
 
   <section id="summary"></section>
@@ -54,6 +54,8 @@
         </select>
         <select id="sort">
           <option value="confirmed">按确认金额</option>
+          <option value="unconfirmed">按未确认金额</option>
+          <option value="progress">先看收货慢的</option>
           <option value="profit">利润从高到低</option>
           <option value="loss">先看亏得多的</option>
           <option value="unknown">先看没挂成本的</option>
