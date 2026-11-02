@@ -96,6 +96,76 @@ function toast(message, bad) {
   toastTimer = setTimeout(() => node.classList.add("hidden"), 4200);
 }
 
+function busyOn() {
+  return !$("#busy").classList.contains("hidden");
+}
+
+function showBusy(title, message, percent) {
+  const root = $("#busy");
+  root.classList.remove("hidden");
+  root.setAttribute("aria-busy", "true");
+  $("#busy-title").textContent = title;
+  setBusy(percent == null ? 3 : percent, message);
+}
+
+function setBusy(percent, message) {
+  const value = Math.max(0, Math.min(100, Number(percent) || 0));
+  $("#busy-bar").style.width = `${value}%`;
+  if (message) $("#busy-msg").textContent = message;
+  $("#busy-pct").textContent = `${Math.round(value)}%`;
+}
+
+function hideBusy() {
+  const root = $("#busy");
+  root.classList.add("hidden");
+  root.setAttribute("aria-busy", "false");
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function postForm(path, form, onUpload) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", path);
+    xhr.upload.onprogress = (event) => {
+      if (!onUpload || !event.lengthComputable || !event.total) return;
+      onUpload(event.loaded / event.total);
+    };
+    xhr.onload = () => {
+      let data = {};
+      try {
+        data = JSON.parse(xhr.responseText || "{}");
+      } catch (error) {
+        reject(new Error("请求失败"));
+        return;
+      }
+      if (xhr.status >= 400 || data.error) reject(new Error(data.error || "请求失败"));
+      else resolve(data);
+    };
+    xhr.onerror = () => reject(new Error("连接中断了，请再试一次"));
+    xhr.send(form);
+  });
+}
+
+async function pollJob(jobId, floor) {
+  const base = floor || 0;
+  let shown = base;
+  while (true) {
+    const job = await api(`/api/jobs/${jobId}`);
+    const next = Math.max(shown, base + (100 - base) * ((Number(job.progress) || 0) / 100));
+    shown = next;
+    setBusy(next, job.message || "正在处理…");
+    if (job.done) {
+      if (job.error) throw new Error(job.error);
+      setBusy(100, job.message || "完成");
+      return job.result;
+    }
+    await sleep(280);
+  }
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, options);
   const type = response.headers.get("content-type") || "";
@@ -370,16 +440,35 @@ function productBody(product) {
     </div>`;
 }
 
+function renderExpenseTotal(rows) {
+  const box = $("#expense-sum");
+  if (!state.expenses.length) {
+    box.innerHTML = "";
+    return;
+  }
+  const summary = state.summary;
+  const filtering = rows.length !== state.expenses.length;
+  const filteredSum = rows.reduce((sum, row) => sum + (Number(row.amount) || 0), 0);
+  box.innerHTML = `
+    <div class="expense-total">
+      <span>本月支出合计</span>
+      <strong>${yuan(summary.expense_total)}</strong>
+      <em>${state.expenses.length} 笔 · 已挂到商品 ${yuan(summary.allocated_total)} · 还没挂 ${yuan(summary.unallocated_total)}</em>
+      ${filtering ? `<em>当前筛出来 ${rows.length} 笔，合计 ${yuan(filteredSum)}</em>` : ""}
+    </div>`;
+}
+
 function renderSide() {
   const q = $("#eq").value.trim().toLowerCase();
   let rows = state.expenses.slice();
   if (q) {
     rows = rows.filter((row) => `${row.name}\n${row.category}\n${row.note}`.toLowerCase().includes(q));
   }
+  renderExpenseTotal(rows);
   const open = rows.filter((row) => row.remaining > 0.004);
   const done = rows.filter((row) => row.remaining <= 0.004);
   if (!state.expenses.length) {
-    $("#expenses").innerHTML = `<div class="empty">还没有这个月的支出。导入支出表，或记一笔。每一笔都会出现在这里，拖到对应的商品上。</div>`;
+    $("#expenses").innerHTML = `<div class="empty">还没有这个月的支出。导入支出表，或记一笔。每一笔都会出现在这里，拖到对应的商品上。导入之后，上面会显示本月支出合计。</div>`;
     return;
   }
   $("#expenses").innerHTML = `
@@ -410,6 +499,7 @@ function expenseCard(expense, done) {
       <div class="ops">
         ${expense.suggestion && expense.remaining > 0 ? `<button type="button" class="linkish" data-suggest="${expense.id}" data-title="${enc(expense.suggestion)}">挂到 ${esc(shortTitle(expense.suggestion))}</button>` : ""}
         <button type="button" class="linkish" data-assign="${expense.id}">挂到…</button>
+        <button type="button" class="linkish" data-split="${expense.id}">拆分</button>
         <button type="button" class="linkish" data-edit="${expense.id}">修改</button>
         <button type="button" class="linkish" data-del-exp="${expense.id}">删除</button>
       </div>
@@ -441,14 +531,20 @@ function zoneFrom(target) {
 }
 
 async function previewFile(file, intent) {
-  if (!file) return;
-  toast("正在读表格…");
+  if (!file || busyOn()) return;
+  const title = intent === "expense" ? "正在读取支出表" : "正在读取收益表";
+  showBusy(title, "正在把表格送进软件…", 3);
   const form = new FormData();
   form.append("file", file);
   try {
-    const info = await api("/api/preview", { method: "POST", body: form });
+    const started = await postForm("/api/preview", form, (ratio) => {
+      setBusy(Math.max(3, Math.round(ratio * 16)), "正在把表格送进软件…");
+    });
+    const info = await pollJob(started.job_id, 16);
+    hideBusy();
     openPreview(info, intent);
   } catch (error) {
+    hideBusy();
     toast(error.message, true);
   }
 }
@@ -557,8 +653,10 @@ async function commitPreview(dialog, pending) {
   const chosenMonth = dialog.querySelector("#imp-month").value;
   const button = dialog.querySelector("#imp-ok");
   button.disabled = true;
+  const writing = pending.kind === "expenses" ? "正在写入支出" : "正在写入收益";
+  showBusy(writing, "正在准备写入账本…", 2);
   try {
-    const result = await jsonCall("/api/commit", "POST", {
+    const started = await jsonCall("/api/commit", "POST", {
       token: pending.info.token,
       kind: pending.kind,
       month: chosenMonth,
@@ -569,19 +667,23 @@ async function commitPreview(dialog, pending) {
       track: dialog.querySelector("#imp-track").value.trim(),
       mapping,
     });
+    const result = await pollJob(started.job_id, 2);
     closeModal();
     if (/^\d{4}-\d{2}$/.test(chosenMonth)) month = chosenMonth;
     else if (pending.info.suggested_month) month = pending.info.suggested_month;
+    await reload();
     const bits = [`导入 ${result.inserted} 行`];
     if (result.updated) bits.push(`更新 ${result.updated} 行`);
     if (result.skipped) bits.push(`跳过 ${result.skipped} 行`);
     if (result.costs) bits.push(`成本 ${result.costs} 笔`);
     if (result.linked) bits.push(`自动挂上 ${result.linked} 笔`);
+    if (pending.kind === "expenses") bits.push(`本月支出合计 ${yuan(state.summary.expense_total)}`);
     toast(bits.join("，"));
-    await reload();
   } catch (error) {
     button.disabled = false;
     toast(error.message, true);
+  } finally {
+    hideBusy();
   }
 }
 
@@ -628,6 +730,107 @@ function openAddExpense() {
       }
     };
   });
+}
+
+function openSplitExpense(expense) {
+  if (!expense) return;
+  const allocated = Math.round((expense.amount - expense.remaining) * 100) / 100;
+  const remaining = Math.round(expense.remaining * 100) / 100;
+  if (remaining <= 0.004) {
+    toast("这笔已经全部挂到商品上了。先把挂上去的金额拿下来，再拆分。", true);
+    return;
+  }
+  const first = Math.round(remaining * 50) / 100;
+  const second = Math.round((remaining - first) * 100) / 100;
+  let parts = [
+    { name: expense.name, amount: first.toFixed(2), note: expense.note || "" },
+    { name: expense.name, amount: second.toFixed(2), note: "" },
+  ];
+
+  function draw() {
+    openModal(`
+      <h3>拆分这笔支出</h3>
+      <p>「${esc(expense.name)}」一共 ${yuan(expense.amount)}。${allocated > 0.004 ? `已经挂到商品上的 ${yuan(allocated)} 留在原单。` : ""}可以拆走的是 ${yuan(remaining)}。填好每一笔的项目、金额和备注，拆开之后还可以再点「修改」。</p>
+      <div class="split-lines">
+        ${parts.map((part, index) => `
+          <div class="split-row">
+            <label class="field">项目<input data-sname value="${esc(part.name)}"></label>
+            <label class="field">金额<input data-samt inputmode="decimal" value="${esc(part.amount)}"></label>
+            <label class="field">备注<input data-snote value="${esc(part.note)}" placeholder="可空"></label>
+            <button type="button" class="btn" data-srm="${index}" ${parts.length < 2 ? "disabled" : ""}>去掉</button>
+          </div>`).join("")}
+      </div>
+      <p id="split-sum" class="split-sum"></p>
+      <div class="actions">
+        <button type="button" class="btn" id="split-add">再加一笔</button>
+        <button type="button" class="btn" id="split-cancel">取消</button>
+        <button type="button" class="btn solid" id="split-ok">拆开</button>
+      </div>
+    `, (dialog) => {
+      const read = () => [...dialog.querySelectorAll(".split-row")].map((row) => ({
+        name: row.querySelector("[data-sname]").value,
+        amount: row.querySelector("[data-samt]").value,
+        note: row.querySelector("[data-snote]").value,
+      }));
+      const paint = () => {
+        let sum = 0;
+        let bad = false;
+        dialog.querySelectorAll("[data-samt]").forEach((input) => {
+          const text = input.value.trim();
+          if (!text) return;
+          const number = Number(text.replace(/[,，¥￥\s]/g, ""));
+          if (!Number.isFinite(number)) bad = true;
+          else sum += number;
+        });
+        sum = Math.round(sum * 100) / 100;
+        const left = Math.round((remaining - sum) * 100) / 100;
+        const node = dialog.querySelector("#split-sum");
+        if (bad) node.textContent = "有一笔金额不是数字";
+        else if (left < -0.009) node.textContent = `合计 ${yuan(sum)}，超出可拆金额 ${yuan(-left)}`;
+        else if (left <= 0.009) node.textContent = allocated > 0.004
+          ? `合计 ${yuan(sum)}，原单只留下已经挂上的 ${yuan(allocated)}`
+          : `合计 ${yuan(sum)}，原单会拆完`;
+        else node.textContent = `合计 ${yuan(sum)}，还留在原单 ${yuan(left + allocated)}`;
+      };
+      paint();
+      dialog.addEventListener("input", paint);
+      dialog.querySelector("#split-cancel").onclick = closeModal;
+      dialog.querySelector("#split-add").onclick = () => {
+        parts = read();
+        parts.push({ name: expense.name, amount: "", note: "" });
+        draw();
+      };
+      dialog.querySelectorAll("[data-srm]").forEach((button) => {
+        button.onclick = () => {
+          const next = read();
+          next.splice(Number(button.dataset.srm), 1);
+          if (next.length) {
+            parts = next;
+            draw();
+          }
+        };
+      });
+      dialog.querySelector("#split-ok").onclick = async () => {
+        const payload = read().filter((part) => String(part.amount).trim() !== "");
+        if (!payload.length) {
+          toast("请至少填一笔金额", true);
+          return;
+        }
+        try {
+          payload.forEach((part) => {
+            part.amount = parseMoney(part.amount);
+          });
+          const result = await jsonCall(`/api/expenses/${expense.id}/split`, "POST", { parts: payload });
+          closeModal();
+          toast(`已拆成 ${result.ids.length} 笔，可以分别改备注和金额`);
+          await reload();
+        } catch (error) {
+          toast(error.message, true);
+        }
+      };
+    });
+  }
+  draw();
 }
 
 function openEditExpense(expense) {
@@ -903,6 +1106,11 @@ function bind() {
     const edit = event.target.closest("[data-edit]");
     if (edit) {
       openEditExpense(state.expenses.find((row) => String(row.id) === edit.dataset.edit));
+      return;
+    }
+    const split = event.target.closest("[data-split]");
+    if (split) {
+      openSplitExpense(state.expenses.find((row) => String(row.id) === split.dataset.split));
       return;
     }
     const del = event.target.closest("[data-del-exp]");

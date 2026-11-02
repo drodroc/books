@@ -7,6 +7,7 @@ import csv
 import hashlib
 import io
 import json
+import math
 import re
 import sqlite3
 import threading
@@ -268,22 +269,46 @@ def product_code(title):
     return match.group(1).upper()
 
 
-def read_tabular(path: Path):
+def _report(progress, fraction, message):
+    if not progress:
+        return
+    try:
+        progress(max(0.0, min(1.0, float(fraction))), str(message))
+    except Exception:
+        pass
+
+
+def _read_fraction(count):
+    if count <= 0:
+        return 0.04
+    # 行数事先不知道，条会一直往前走，越到后面越慢，读完再拉满。
+    return 0.72 * (1 - math.exp(-count / 3500))
+
+
+def _make_tick(progress, start, end):
+    def tick(done, total, message):
+        total = total or 1
+        _report(progress, start + (end - start) * (done / total), message)
+    return tick
+
+
+def read_tabular(path: Path, progress=None):
     suffix = path.suffix.lower()
     if suffix == ".csv":
-        return [("CSV", _read_csv(path))]
+        return [("CSV", _read_csv(path, progress))]
     if suffix == ".xls":
         raise ValueError("不支持老的 .xls。请用 Excel 另存为 .xlsx 再导入。")
     if suffix not in (".xlsx", ".xlsm"):
         raise ValueError("请上传 .xlsx 或 .csv 表格。")
-    warnings_filter = openpyxl.styles.stylesheet
     # openpyxl 对没有默认样式的导出表会警告，不影响数据。
     import warnings
 
+    _report(progress, 0.04, "正在打开表格")
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=UserWarning)
         wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
         sheets = []
+        seen = 0
         try:
             for name in wb.sheetnames:
                 ws = wb[name]
@@ -292,13 +317,17 @@ def read_tabular(path: Path):
                     if index >= 30000:
                         break
                     rows.append(list(row))
+                    seen += 1
+                    if seen % 400 == 0:
+                        _report(progress, _read_fraction(seen), f"正在读取表格，已读 {seen} 行")
                 sheets.append((name, rows))
         finally:
             wb.close()
+    _report(progress, 0.72, f"表格读完了，共 {seen} 行")
     return sheets
 
 
-def _read_csv(path: Path):
+def _read_csv(path: Path, progress=None):
     raw = path.read_bytes()
     text = None
     for encoding in ("utf-8-sig", "gb18030", "utf-16"):
@@ -315,7 +344,15 @@ def _read_csv(path: Path):
     except csv.Error:
         dialect = csv.excel
     reader = csv.reader(io.StringIO(text), dialect)
-    return [row for _, row in zip(range(30000), reader)]
+    rows = []
+    for index, row in enumerate(reader):
+        if index >= 30000:
+            break
+        rows.append(row)
+        if index and index % 400 == 0:
+            _report(progress, _read_fraction(index), f"正在读取表格，已读 {index} 行")
+    _report(progress, 0.72, f"表格读完了，共 {len(rows)} 行")
+    return rows
 
 
 def _header_index(rows):
@@ -450,8 +487,11 @@ def _data_rows(chosen):
     return rows
 
 
-def analyze_file(path: Path):
-    sheets = read_tabular(path)
+def analyze_file(path: Path, progress=None):
+    def on_read(fraction, message):
+        _report(progress, (fraction / 0.72) * 0.76, message)
+
+    sheets = read_tabular(path, progress=on_read)
     chosen = choose_sheet(sheets)
     track = _track_from_sheets(sheets)
     kind = chosen["kind"]
@@ -463,7 +503,15 @@ def analyze_file(path: Path):
     preview = []
     if kind == "unknown":
         warnings.append("没有认出这是收益表还是支出表，请在下面指定每一列是什么。")
-    for raw, title in _data_rows(chosen):
+    data_rows = _data_rows(chosen)
+    total_rows = len(data_rows)
+    for index, (raw, title) in enumerate(data_rows, start=1):
+        if index == 1 or index == total_rows or index % 400 == 0:
+            _report(
+                progress,
+                0.78 + 0.2 * (index / (total_rows or 1)),
+                f"正在识别每一行，{index} / {total_rows}",
+            )
         if kind == "orders":
             paid = to_float(_get(raw, mapping, "paid"))
             qty = to_float(_get(raw, mapping, "qty"))
@@ -552,6 +600,7 @@ def analyze_file(path: Path):
     real_months = [m for m in months if valid_month(m)]
     if real_months:
         suggested = sorted(real_months)[-1]
+    _report(progress, 1, "表格已经识别完")
     return {
         "kind": kind,
         "sheet": chosen["sheet"],
@@ -612,9 +661,14 @@ def _apply_mapping(chosen, mapping):
     return chosen
 
 
-def commit_import(conn, token, kind, month, include_costs, mapping, track, allow_overlap=False, assign_undated=False, costs_only=False):
+def commit_import(conn, token, kind, month, include_costs, mapping, track, allow_overlap=False, assign_undated=False, costs_only=False, progress=None):
+    _report(progress, 0.02, "正在打开表格")
     meta, path = load_upload(token)
-    sheets = read_tabular(path)
+
+    def on_read(fraction, message):
+        _report(progress, 0.02 + (fraction / 0.72) * 0.30, message)
+
+    sheets = read_tabular(path, progress=on_read)
     chosen = choose_sheet(sheets)
     file_track = track or _track_from_sheets(sheets)
     if mapping:
@@ -657,22 +711,33 @@ def commit_import(conn, token, kind, month, include_costs, mapping, track, allow
     costs = 0
     linked = 0
     titles = set()
+    _report(progress, 0.34, "正在写入账本")
     if kind == "orders":
         inserted, updated, skipped, titles = _commit_orders(
-            conn, chosen, import_id, meta["filename"], month, assign_undated
+            conn, chosen, import_id, meta["filename"], month, assign_undated,
+            tick=_make_tick(progress, 0.34, 0.96),
         )
     elif kind == "aggregated":
         if not costs_only:
-            inserted, skipped, titles = _commit_aggregated(conn, chosen, import_id, meta["filename"], month)
+            inserted, skipped, titles = _commit_aggregated(
+                conn, chosen, import_id, meta["filename"], month,
+                tick=_make_tick(progress, 0.34, 0.62 if (include_costs or costs_only) else 0.96),
+            )
         if include_costs or costs_only:
-            costs, linked = _commit_embedded_costs(conn, chosen, import_id, meta["filename"], month)
+            costs, linked = _commit_embedded_costs(
+                conn, chosen, import_id, meta["filename"], month,
+                tick=_make_tick(progress, 0.64 if not costs_only else 0.34, 0.96),
+            )
             if costs_only:
                 titles = {row[0] for row in conn.execute(
                     "SELECT DISTINCT title FROM allocations a JOIN expenses e ON e.id=a.expense_id WHERE e.import_id=?",
                     (import_id,),
                 )}
     else:
-        inserted, skipped, linked = _commit_expenses(conn, chosen, import_id, meta["filename"], month)
+        inserted, skipped, linked = _commit_expenses(
+            conn, chosen, import_id, meta["filename"], month,
+            tick=_make_tick(progress, 0.34, 0.96),
+        )
     if file_track:
         for title in titles:
             conn.execute(
@@ -681,7 +746,9 @@ def commit_import(conn, token, kind, month, include_costs, mapping, track, allow
                 (title, file_track, ""),
             )
     conn.execute("UPDATE imports SET row_count = ? WHERE id = ?", (inserted + costs, import_id))
+    _report(progress, 0.98, "正在保存")
     conn.commit()
+    _report(progress, 1, "写入完成")
     try:
         path.unlink()
         (TMP / f"{token}.json").unlink()
@@ -700,12 +767,17 @@ def commit_import(conn, token, kind, month, include_costs, mapping, track, allow
     }
 
 
-def _commit_orders(conn, chosen, import_id, filename, forced_month, assign_undated=False):
+def _commit_orders(conn, chosen, import_id, filename, forced_month, assign_undated=False, tick=None):
     mapping = chosen["mapping"]
     inserted = updated = skipped = 0
     titles = set()
     seen = set()
-    for raw, title in _data_rows(chosen):
+    rows = _data_rows(chosen)
+    total = len(rows)
+    step = max(1, total // 40) if total else 1
+    for index, (raw, title) in enumerate(rows, start=1):
+        if tick and (index == total or index % step == 0):
+            tick(index, total, f"正在写入订单，{index} / {total}")
         if not title:
             skipped += 1
             continue
@@ -774,11 +846,16 @@ def _commit_orders(conn, chosen, import_id, filename, forced_month, assign_undat
     return inserted, updated, skipped, titles
 
 
-def _commit_aggregated(conn, chosen, import_id, filename, month):
+def _commit_aggregated(conn, chosen, import_id, filename, month, tick=None):
     mapping = chosen["mapping"]
     inserted = skipped = 0
     titles = set()
-    for raw, title in _data_rows(chosen):
+    rows = _data_rows(chosen)
+    total = len(rows)
+    step = max(1, total // 40) if total else 1
+    for index, (raw, title) in enumerate(rows, start=1):
+        if tick and (index == total or index % step == 0):
+            tick(index, total, f"正在写入收益，{index} / {total}")
         qty = to_float(_get(raw, mapping, "qty")) or 0
         paid = to_float(_get(raw, mapping, "paid"))
         if not title or paid is None or (qty == 0 and paid == 0):
@@ -806,13 +883,18 @@ def _commit_aggregated(conn, chosen, import_id, filename, month):
     return inserted, skipped, titles
 
 
-def _commit_embedded_costs(conn, chosen, import_id, filename, month):
+def _commit_embedded_costs(conn, chosen, import_id, filename, month, tick=None):
     mapping = chosen["mapping"]
     if "detail" not in mapping or "line_cost" not in mapping:
         return 0, 0
     inserted = linked = 0
     last_title = ""
-    for index, (raw, title) in enumerate(_data_rows(chosen)):
+    rows = _data_rows(chosen)
+    total = len(rows)
+    step = max(1, total // 40) if total else 1
+    for index, (raw, title) in enumerate(rows):
+        if tick and (index + 1 == total or (index + 1) % step == 0):
+            tick(index + 1, total, f"正在写入成本，{index + 1} / {total}")
         if title:
             last_title = title
         detail = cell_text(_get(raw, mapping, "detail"))
@@ -838,11 +920,16 @@ def _commit_embedded_costs(conn, chosen, import_id, filename, month):
     return inserted, linked
 
 
-def _commit_expenses(conn, chosen, import_id, filename, month):
+def _commit_expenses(conn, chosen, import_id, filename, month, tick=None):
     mapping = chosen["mapping"]
     inserted = skipped = linked = 0
     known = [r[0] for r in conn.execute("SELECT DISTINCT title FROM revenue_lines")]
-    for index, (raw, title) in enumerate(_data_rows(chosen)):
+    rows = _data_rows(chosen)
+    total = len(rows)
+    step = max(1, total // 40) if total else 1
+    for index, (raw, title) in enumerate(rows):
+        if tick and (index + 1 == total or (index + 1) % step == 0):
+            tick(index + 1, total, f"正在写入支出，{index + 1} / {total}")
         name = cell_text(_get(raw, mapping, "name")) or cell_text(_get(raw, mapping, "detail"))
         if "amount" in mapping:
             amount = to_float(_get(raw, mapping, "amount"))
@@ -961,6 +1048,63 @@ def update_expense(conn, expense_id, fields):
         ),
     )
     conn.commit()
+
+
+def split_expense(conn, expense_id, parts):
+    """把一笔支出里还没挂出去的金额拆成几笔。每一笔可以自带项目、金额和备注。"""
+    row = conn.execute("SELECT * FROM expenses WHERE id = ?", (expense_id,)).fetchone()
+    if not row:
+        raise ValueError("找不到这笔支出。")
+    if not isinstance(parts, list) or not parts:
+        raise ValueError("请至少拆出一笔。")
+    cleaned = []
+    for part in parts:
+        if not isinstance(part, dict):
+            raise ValueError("拆分内容不对。")
+        name = (part.get("name") or "").strip() or row["name"]
+        amount = to_float(part.get("amount"))
+        note = (part.get("note") or "").strip()
+        if amount is None or amount <= 0:
+            raise ValueError("拆出来的每一笔金额都要大于 0。")
+        cleaned.append((name, money(amount), note))
+    total = money(sum(amount for _, amount, _ in cleaned))
+    allocated = conn.execute(
+        "SELECT COALESCE(SUM(amount),0) s FROM allocations WHERE expense_id = ?",
+        (expense_id,),
+    ).fetchone()["s"]
+    remaining = money(row["amount"] - allocated)
+    if total - remaining > 0.009:
+        if allocated > 0.009:
+            raise ValueError(
+                f"还没挂出去的只有 {remaining:.2f}。已经挂到商品上的部分要先拿下来，才能拆走。"
+            )
+        raise ValueError(f"拆分合计 {total:.2f} 超过了这笔支出的 {money(row['amount']):.2f}。")
+    new_ids = []
+    for name, amount, note in cleaned:
+        cur = conn.execute(
+            """INSERT INTO expenses (fingerprint, import_id, name, amount, spent_on, month, category, note, source_file)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (
+                None,
+                row["import_id"],
+                name,
+                amount,
+                row["spent_on"] or "",
+                row["month"],
+                row["category"] or "",
+                note,
+                row["source_file"] or "拆分",
+            ),
+        )
+        new_ids.append(cur.lastrowid)
+    leftover = money(row["amount"] - total)
+    kept = leftover > 0.009 or allocated > 0.009
+    if kept:
+        conn.execute("UPDATE expenses SET amount = ? WHERE id = ?", (max(leftover, money(allocated)), expense_id))
+    else:
+        conn.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
+    conn.commit()
+    return {"ids": new_ids, "kept": kept, "leftover": leftover if kept else 0}
 
 
 def delete_expense(conn, expense_id):

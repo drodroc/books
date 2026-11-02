@@ -35,7 +35,7 @@
   </header>
 
   <p class="rules">
-    同一个商品、同一种商品属性的数量和金额会加在一起。每一行同时列出：这个月确认收货的数量和金额，以及这个月付了款但还没有确认收货的数量和金额。收货进度是确认数量占这两部分合计的比例。退款成功不计入。右边每一笔支出拖到对应商品上，收入减去这些成本，就是这个商品赚的钱。默认只用确认收货算盈亏。
+    同一个商品、同一种商品属性的数量和金额会加在一起。每一行同时列出：这个月确认收货的数量和金额，以及这个月付了款但还没有确认收货的数量和金额。收货进度是确认数量占这两部分合计的比例。退款成功不计入。右边每一笔支出拖到对应商品上，收入减去这些成本，就是这个商品赚的钱。默认只用确认收货算盈亏。选好表格后中间会显示进度，大表要多等一会儿。
   </p>
 
   <section id="summary"></section>
@@ -72,7 +72,8 @@
     <aside id="side">
       <div class="side-head">
         <h2>支出</h2>
-        <p>拖到左边的商品上。拖过去是剩下的全部金额，挂上之后可以改小，多出来的会回到这里。</p>
+        <p>拖到左边的商品上。拖过去是剩下的全部金额，挂上之后可以改小，多出来的会回到这里。一笔支出可以拆成几笔，再改每一笔的备注和金额。</p>
+        <div id="expense-sum"></div>
         <input id="eq" type="search" placeholder="搜支出" autocomplete="off">
       </div>
       <div id="expenses"></div>
@@ -80,6 +81,14 @@
   </main>
 
   <div id="modal" class="modal hidden"></div>
+  <div id="busy" class="busy hidden" role="alertdialog" aria-modal="true" aria-labelledby="busy-title" aria-busy="false">
+    <div class="busy-card">
+      <h3 id="busy-title">正在导入</h3>
+      <p id="busy-msg">请稍等，表格正在处理。</p>
+      <div class="busy-track" aria-hidden="true"><i id="busy-bar"></i></div>
+      <div id="busy-pct" class="busy-pct">0%</div>
+    </div>
+  </div>
   <div id="toast" class="toast hidden" role="status"></div>
   <input id="file-revenue" type="file" accept=".xlsx,.xlsm,.csv" hidden>
   <input id="file-expense" type="file" accept=".xlsx,.xlsm,.csv" hidden>

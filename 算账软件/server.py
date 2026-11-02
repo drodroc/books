@@ -8,6 +8,7 @@ import mimetypes
 import re
 import sys
 import threading
+import uuid
 import webbrowser
 from email.parser import BytesParser
 from email.policy import default
@@ -21,6 +22,72 @@ ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
 HOST = "127.0.0.1"
 MAX_BODY = 80 * 1024 * 1024
+
+_jobs = {}
+_jobs_lock = threading.Lock()
+
+
+def _job_new():
+    job_id = uuid.uuid4().hex
+    with _jobs_lock:
+        _jobs[job_id] = {
+            "progress": 0,
+            "message": "正在开始…",
+            "done": False,
+            "error": None,
+            "result": None,
+        }
+        if len(_jobs) > 40:
+            finished = [key for key, job in _jobs.items() if job["done"]]
+            for key in finished[:-8]:
+                _jobs.pop(key, None)
+    return job_id
+
+
+def _job_update(job_id, fraction, message):
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if not job or job["done"]:
+            return
+        job["progress"] = int(max(0, min(100, round(float(fraction) * 100))))
+        job["message"] = message or job["message"]
+
+
+def _job_finish(job_id, result=None, error=None):
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if not job:
+            return
+        job["done"] = True
+        job["error"] = error
+        job["result"] = result
+        if error:
+            job["message"] = error
+        else:
+            job["progress"] = 100
+            job["message"] = job["message"] or "完成"
+
+
+def _job_public(job_id):
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if not job:
+            return None
+        data = {
+            "progress": job["progress"],
+            "message": job["message"],
+            "done": job["done"],
+            "error": job["error"],
+        }
+        if job["done"] and not job["error"]:
+            data["result"] = job["result"]
+        return data
+
+
+def _job_error_text(exc):
+    if isinstance(exc, ValueError):
+        return str(exc)
+    return f"出错了：{exc}"
 
 
 def db_call(fn):
@@ -124,6 +191,14 @@ class App(BaseHTTPRequestHandler):
             if path.startswith("/static/"):
                 self._static(path[len("/static/") :])
                 return
+            job = re.fullmatch(r"/api/jobs/([0-9a-f]{32})", path)
+            if job:
+                snap = _job_public(job.group(1))
+                if not snap:
+                    self._error("这次导入已经结束或找不到了。", 404)
+                    return
+                self._json(snap)
+                return
             if path == "/api/state":
                 query = self._query()
                 month = (query.get("month") or [""])[0]
@@ -175,31 +250,70 @@ class App(BaseHTTPRequestHandler):
                     return
                 upload = files[0]
                 token, saved = ledger.save_upload(upload["filename"], upload["data"])
-                try:
-                    info = ledger.analyze_file(saved)
-                except Exception:
-                    saved.unlink(missing_ok=True)
-                    (ledger.TMP / f"{token}.json").unlink(missing_ok=True)
-                    raise
-                info["token"] = token
-                info["filename"] = upload["filename"]
-                self._json(info)
+                job_id = _job_new()
+                filename = upload["filename"]
+
+                def work():
+                    try:
+                        info = ledger.analyze_file(saved, progress=lambda frac, msg: _job_update(job_id, frac, msg))
+                        info["token"] = token
+                        info["filename"] = filename
+                        _job_finish(job_id, info)
+                    except Exception as exc:
+                        saved.unlink(missing_ok=True)
+                        (ledger.TMP / f"{token}.json").unlink(missing_ok=True)
+                        _job_finish(job_id, error=_job_error_text(exc))
+
+                threading.Thread(target=work, daemon=True).start()
+                self._json({"job_id": job_id})
                 return
             if path == "/api/commit":
                 body = self._json_body()
+                job_id = _job_new()
+                payload = {
+                    "token": body.get("token", ""),
+                    "kind": body.get("kind") or "",
+                    "month": body.get("month") or "",
+                    "include_costs": bool(body.get("include_costs", True)),
+                    "mapping": body.get("mapping") or None,
+                    "track": (body.get("track") or "").strip(),
+                    "allow_overlap": bool(body.get("allow_overlap")),
+                    "assign_undated": bool(body.get("assign_undated")),
+                    "costs_only": bool(body.get("costs_only")),
+                }
+
+                def work():
+                    try:
+                        with ledger._lock:
+                            conn = ledger.connect()
+                            try:
+                                result = ledger.commit_import(
+                                    conn,
+                                    payload["token"],
+                                    payload["kind"],
+                                    payload["month"],
+                                    payload["include_costs"],
+                                    payload["mapping"],
+                                    payload["track"],
+                                    payload["allow_overlap"],
+                                    payload["assign_undated"],
+                                    payload["costs_only"],
+                                    progress=lambda frac, msg: _job_update(job_id, frac, msg),
+                                )
+                            finally:
+                                conn.close()
+                        _job_finish(job_id, result)
+                    except Exception as exc:
+                        _job_finish(job_id, error=_job_error_text(exc))
+
+                threading.Thread(target=work, daemon=True).start()
+                self._json({"job_id": job_id})
+                return
+            split = re.fullmatch(r"/api/expenses/(\d+)/split", path)
+            if split:
+                body = self._json_body()
                 result = db_call(
-                    lambda conn: ledger.commit_import(
-                        conn,
-                        body.get("token", ""),
-                        body.get("kind") or "",
-                        body.get("month") or "",
-                        bool(body.get("include_costs", True)),
-                        body.get("mapping") or None,
-                        (body.get("track") or "").strip(),
-                        bool(body.get("allow_overlap")),
-                        bool(body.get("assign_undated")),
-                        bool(body.get("costs_only")),
-                    )
+                    lambda conn: ledger.split_expense(conn, int(split.group(1)), body.get("parts") or [])
                 )
                 self._json(result)
                 return

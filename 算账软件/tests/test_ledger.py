@@ -213,6 +213,65 @@ class LedgerTest(unittest.TestCase):
         self.assertEqual(by_title["乙"]["cost"], 300)
         self.assertEqual(by_title["甲"]["status"], "unknown")
 
+    def test_split_expense_into_editable_parts(self):
+        expense_id = ledger.add_expense(self.conn, "整单采购", 1000, "2026-10", note="供应商A")
+        ledger.allocate(self.conn, expense_id, "甲", 200)
+        with self.assertRaises(ValueError):
+            ledger.split_expense(self.conn, expense_id, [{"name": "太多", "amount": 900, "note": ""}])
+        result = ledger.split_expense(self.conn, expense_id, [
+            {"name": "板材", "amount": 300, "note": "第一批"},
+            {"name": "螺丝", "amount": 500, "note": "补的"},
+        ])
+        self.assertEqual(len(result["ids"]), 2)
+        self.assertTrue(result["kept"])
+        state = ledger.build_state(self.conn, "2026-10")
+        by_name = {item["name"]: item for item in state["expenses"]}
+        self.assertEqual(by_name["整单采购"]["amount"], 200)
+        self.assertEqual(by_name["整单采购"]["remaining"], 0)
+        self.assertEqual(by_name["板材"]["note"], "第一批")
+        self.assertEqual(by_name["螺丝"]["amount"], 500)
+        self.assertEqual(state["summary"]["expense_total"], 1000)
+        ledger.update_expense(self.conn, result["ids"][0], {
+            "name": "板材改",
+            "amount": 280,
+            "note": "改过备注",
+            "month": "2026-10",
+        })
+        state = ledger.build_state(self.conn, "2026-10")
+        renamed = next(item for item in state["expenses"] if item["id"] == result["ids"][0])
+        self.assertEqual(renamed["name"], "板材改")
+        self.assertEqual(renamed["amount"], 280)
+        self.assertEqual(renamed["note"], "改过备注")
+        self.assertEqual(state["summary"]["expense_total"], 980)
+        other = ledger.add_expense(self.conn, "运费单", 80, "2026-10", note="顺丰")
+        ledger.split_expense(self.conn, other, [
+            {"name": "运费-甲", "amount": 30, "note": "甲的运费"},
+            {"name": "运费-乙", "amount": 50, "note": "乙的运费"},
+        ])
+        names = {item["name"]: item for item in ledger.build_state(self.conn, "2026-10")["expenses"]}
+        self.assertNotIn("运费单", names)
+        self.assertEqual(names["运费-甲"]["note"], "甲的运费")
+        self.assertEqual(names["运费-乙"]["amount"], 50)
+
+    def test_import_reports_progress(self):
+        data = make_xlsx([("export", [
+            ORDER_HEADERS,
+            ["A1", "夹爪", 10, 1, "红", "", 10, 10, "没有申请退款", "", "2026-10-02", "1", "2026-10-20"],
+        ])])
+        token, path = ledger.save_upload("进度.xlsx", data)
+        seen = []
+        info = ledger.analyze_file(path, progress=lambda frac, message: seen.append((frac, message)))
+        self.assertEqual(info["kind"], "orders")
+        self.assertGreaterEqual(seen[-1][0], 0.99)
+        self.assertTrue(any("读" in message for _, message in seen))
+        seen.clear()
+        ledger.commit_import(
+            self.conn, token, "orders", "2026-10", True, None, "", False,
+            progress=lambda frac, message: seen.append((frac, message)),
+        )
+        self.assertGreaterEqual(seen[-1][0], 0.99)
+        self.assertTrue(any("写入" in message for _, message in seen))
+
     def test_expense_links_by_product_code_and_no_cost_flag(self):
         self.import_bytes("收益.xlsx", make_xlsx([("export", [
             ORDER_HEADERS,
