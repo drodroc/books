@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"github.com/jchv/go-webview2"
 	"golang.org/x/sys/windows"
@@ -18,18 +19,18 @@ import (
 var assets embed.FS
 
 func main() {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		showError("算账窗口没有打开：" + err.Error())
-		return
-	}
-	go http.Serve(listener, http.FileServer(http.FS(assets)))
-
 	dataPath, err := localDataDir()
 	if err != nil {
 		showError("数据文件夹没有建在程序旁边：" + err.Error())
 		return
 	}
+	port := choosePort(dataPath)
+	listener, err := net.Listen("tcp", "127.0.0.1:"+strconvPort(port))
+	if err != nil {
+		showError("月度算账已经在运行，或原来的账本端口被占用。请先关掉已经打开的窗口，再重新打开。")
+		return
+	}
+	go http.Serve(listener, http.FileServer(http.FS(assets)))
 
 	view := webview2.NewWithOptions(webview2.WebViewOptions{
 		Debug:     false,
@@ -64,10 +65,25 @@ func localDataDir() (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
+	legacy := legacyDataDir()
 	if !profileExists(dir) {
-		_ = copyTree(legacyDataDir(), dir)
+		_ = copyTree(legacy, dir)
+	} else if findBestOrigin(legacy).size > findBestOrigin(dir).size {
+		_ = copyTree(legacy, dir)
 	}
 	return dir, nil
+}
+
+func choosePort(dataDir string) int {
+	hit := findBestOrigin(dataDir, legacyDataDir())
+	if hit.port > 0 && hit.size > 0 {
+		return hit.port
+	}
+	return stablePort
+}
+
+func strconvPort(port int) string {
+	return strconv.Itoa(port)
 }
 
 func legacyDataDir() string {
