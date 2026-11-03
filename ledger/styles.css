@@ -204,6 +204,10 @@ tr.selected td { box-shadow: inset 3px 0 0 var(--navy); }
 .income-block { border-bottom: 1px solid var(--line); }
 .income-block h3 { margin: 0; padding: 12px 14px 8px; font-size: 15px; }
 .income-row td { background: #f3faf6; }
+.fixed-row td { background: #f7f3ea; }
+.fixed-scroll { max-height: 220px; }
+.add-cat { display: flex; gap: 8px; align-items: center; padding: 8px 14px 12px; }
+.add-cat input { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; width: 220px; }
 .files { display: flex; gap: 6px; flex-wrap: wrap; padding: 0 14px 10px; }
 .file-pill { font-size: 12px; background: #f3ecdf; border-radius: 999px; padding: 3px 8px; color: #5c5142; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .panel-head h3 { white-space: nowrap; }

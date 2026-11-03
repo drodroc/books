@@ -12,6 +12,7 @@
     filter: "all",
     sort: "confirmed",
     expanded: {},
+    categories: [],
     selectedExpenseId: "",
     selectedProductKey: "",
     detail: null,
@@ -87,7 +88,8 @@ function fmtQty(qty) {
           incomes: state.incomes,
           files: state.files,
           month: state.month,
-          expanded: state.expanded
+          expanded: state.expanded,
+          categories: state.categories
         }, "state");
       }).catch(function () {});
     }, 200);
@@ -515,6 +517,29 @@ function fmtQty(qty) {
     toast("已拆出 " + fmtMoney(cents) + " 元，拖到另一个产品上");
   }
 
+  function addCategory() {
+    var input = document.getElementById("new-category");
+    var name = input ? input.value.trim() : "";
+    if (!name) {
+      toast("先写下固定项目的名字");
+      return;
+    }
+    if (allCategories().indexOf(name) !== -1) {
+      toast("已经有这个项目");
+      return;
+    }
+    state.categories = state.categories || [];
+    state.categories.push(name);
+    saveState();
+    render();
+  }
+
+  function removeCategory(name) {
+    state.categories = (state.categories || []).filter(function (item) { return item !== name; });
+    saveState();
+    render();
+  }
+
   function removeExpense(expenseId) {
     state.expenses = state.expenses.filter(function (expense) { return expense.id !== expenseId; });
     saveState();
@@ -596,6 +621,42 @@ function fmtQty(qty) {
     return "<td class='num'>" + fmtQty(bucket.qty) + "</td><td class='num'>" + fmtMoney(bucket.cents) + "</td>";
   }
 
+  var defaultCategories = ["研发", "通用材料", "运营成本", "快递费用"];
+
+  function allCategories() {
+    var names = defaultCategories.slice();
+    (state.categories || []).forEach(function (name) {
+      name = String(name || "").trim();
+      if (name && names.indexOf(name) === -1) names.push(name);
+    });
+    return names;
+  }
+
+  function categoryKey(name) {
+    return "C:" + name;
+  }
+
+  function captureScroll() {
+    var pos = {};
+    document.querySelectorAll("[data-scroll]").forEach(function (el) {
+      pos[el.getAttribute("data-scroll")] = el.scrollTop;
+    });
+    return pos;
+  }
+
+  function restoreScroll(pos) {
+    if (!pos) return;
+    function apply() {
+      document.querySelectorAll("[data-scroll]").forEach(function (el) {
+        var key = el.getAttribute("data-scroll");
+        if (pos[key] != null) el.scrollTop = pos[key];
+      });
+    }
+    apply();
+    requestAnimationFrame(apply);
+    setTimeout(apply, 0);
+  }
+
   function linksHtml(items) {
     if (!items || !items.length) return "";
     return "<div class='linked'>" + items.map(function (item) {
@@ -635,6 +696,7 @@ function fmtQty(qty) {
   }
 
   function render() {
+    var scrollPos = captureScroll();
     var active = document.activeElement;
     var activeId = active && active.id;
     var selection = active && typeof active.selectionStart === "number" ? active.selectionStart : null;
@@ -645,10 +707,7 @@ function fmtQty(qty) {
     var expenses = report.expenses.filter(function (expense) {
       return expenseMatches(expense, query);
     }).sort(function (a, b) {
-      var aOpen = a.allocs.length ? 1 : 0;
-      var bOpen = b.allocs.length ? 1 : 0;
-      if (aOpen !== bOpen) return aOpen - bOpen;
-      return (b.dateStamp || "").localeCompare(a.dateStamp || "");
+      return (b.dateStamp || "").localeCompare(a.dateStamp || "") || a.name.localeCompare(b.name, "zh");
     });
 
     var verdict = "先导入收益表。";
@@ -730,8 +789,22 @@ function fmtQty(qty) {
         "<td class='num'>" + fmtMoney(income.costCents) + "</td>" +
         "<td class='num'>" + fmtMoney(income.profitCents) + " <span class='tag " + badge.cls + "'>" + badge.text + "</span></td></tr>";
     }).join("");
+    var fixedRows = allCategories().map(function (name) {
+      var key = categoryKey(name);
+      var linked = linksByKey[key] || [];
+      var total = linked.reduce(function (sum, item) { return sum + item.cents; }, 0);
+      var selected = state.selectedProductKey === key ? " selected" : "";
+      var extra = defaultCategories.indexOf(name) === -1;
+      return "<tr class='fixed-row droppable" + selected + "' data-drop='" + encodeURIComponent(key) + "' data-label='" + esc(name) + "'>" +
+        "<td class='product'><div class='product-name'><strong>" + esc(name) + "</strong>" + linksHtml(linked) + "</div></td>" +
+        "<td class='num' colspan='2'>" + (linked.length ? linked.length + " 笔" : "还没有支出") + "</td>" +
+        "<td class='num' colspan='2'>固定支出" + (extra ? " <button class='btn tiny' data-act='remove-category' data-name='" + esc(name) + "'>删除</button>" : "") + "</td>" +
+        "<td class='num'>" + fmtMoney(total) + "</td>" +
+        "<td class='num'>" + fmtMoney(total) + "</td></tr>";
+    }).join("");
+    var fixedTable = "<div class='income-block'><h3>固定支出</h3><div class='table-wrap fixed-scroll' data-scroll='fixed'><table><thead><tr><th>项目</th><th class='num' colspan='2'>笔数</th><th class='num' colspan='2'>类型</th><th class='num'>已对应支出</th><th class='num'>合计</th></tr></thead><tbody>" + fixedRows + "</tbody></table></div><div class='add-cat'><input id='new-category' placeholder='再加一个固定项目，例如房租'><button class='btn tiny' data-act='add-category'>添加</button></div></div>";
     var incomeTable = incomeRows
-      ? "<div class='income-block'><h3>账单收入 · " + shownIncomes.length + " 笔</h3><div class='table-wrap income-scroll'><table><thead><tr><th>收入</th><th class='num' colspan='2'>金额</th><th class='num' colspan='2'>来源</th><th class='num'>已对应成本</th><th class='num'>结余</th></tr></thead><tbody>" + incomeRows + "</tbody></table></div></div>"
+      ? "<div class='income-block'><h3>账单收入 · " + shownIncomes.length + " 笔</h3><div class='table-wrap income-scroll' data-scroll='income'><table><thead><tr><th>收入</th><th class='num' colspan='2'>金额</th><th class='num' colspan='2'>来源</th><th class='num'>已对应成本</th><th class='num'>结余</th></tr></thead><tbody>" + incomeRows + "</tbody></table></div></div>"
       : "";
     var body = "";
     if (!products.length) {
@@ -754,7 +827,7 @@ function fmtQty(qty) {
       var cls = "card" + (assigned ? " assigned" : "") + (state.selectedExpenseId === expense.id ? " selected" : "");
       var where = assigned
         ? "<div class='meta'>已分到「" + esc(assigned.targetLabel) + "」</div>"
-        : "<div class='meta'>还没对应。拖到左边的收入或商品上。</div>";
+        : "<div class='meta'>还没对应。拖到左边的收入、固定项目或商品上。</div>";
       return "<article class='" + cls + "' draggable='true' data-expense='" + esc(expense.id) + "'>" +
         "<div class='card-top'><strong>" + esc(expense.name) + "</strong><span class='money'>" + fmtMoney(expense.amountCents) + "</span></div>" +
         "<div class='meta'>" + esc(fmtDate(expense.dateStamp)) + (expense.note ? " · " + esc(expense.note) : "") + "</div>" +
@@ -813,14 +886,15 @@ function fmtQty(qty) {
           "</div></div>" +
           "<div class='chips'>" + filters + "</div>" +
           (filePills ? "<div class='files'>" + filePills + "</div>" : "") +
+          fixedTable +
           incomeTable +
-          "<div class='table-wrap product-scroll'><table><thead><tr>" +
+          "<div class='table-wrap product-scroll' data-scroll='product'><table><thead><tr>" +
             "<th>商品</th><th class='num'>确认数量</th><th class='num'>确认金额</th><th class='num'>未确认数量</th><th class='num'>未确认金额</th><th class='num'>成本</th><th class='num'>利润</th>" +
           "</tr></thead><tbody>" + body + "</tbody></table></div>" +
         "</section>" +
         "<aside class='panel expense-panel'>" +
           "<div class='panel-head'><h3>支出 · " + expenses.length + " 笔</h3><div class='tools'><input id='expense-query' type='search' placeholder='搜名称或金额' value='" + esc(state.expenseQuery) + "'></div></div>" +
-          "<div class='expense-list'>" + cards + "</div>" +
+          "<div class='expense-list' data-scroll='expense'>" + cards + "</div>" +
         "</aside>" +
       "</main>" +
       "<input id='file-revenue' type='file' accept='.xlsx,.xls' multiple hidden>" +
@@ -828,7 +902,7 @@ function fmtQty(qty) {
       (state.toast ? "<div class='toast'>" + esc(state.toast) + "</div>" : "") +
       modalHtml(report);
 
-    if (activeId) {
+    if (activeId && activeId !== "new-category") {
       var next = document.getElementById(activeId);
       if (next) {
         next.focus();
@@ -838,6 +912,7 @@ function fmtQty(qty) {
         }
       }
     }
+    restoreScroll(scrollPos);
   }
 
   function modalHtml() {
@@ -849,7 +924,8 @@ function fmtQty(qty) {
         "<li>没有付款时间、也没有确认收货、实付为 0 的行，当作没付成，不计入。</li>" +
         "<li>支出表可以是自己做的项目和金额，也可以是支付宝账单（支出（-元）、收入（+元））或银行公户（支出金额、收入金额）。一次选中多张表会全部导入。同一份文件再导入一次，用新的替换旧的。</li>" +
         "<li>账单里的收入单独列出来。把右边的支出拖到某一笔收入上，结余就是这笔收入减去对应成本，这一笔下面会列出已经关联的支出和金额。拖到商品标题上，成本算整个商品；拖到某个属性上，成本只算这个属性。一份支出对应几笔时，先拆开再拖。</li>" +
-        "<li>右边的支出可以按名称搜，也可以按金额搜，比如 1450 或 86.50。</li>" +
+        "<li>右边的支出可以按名称搜，也可以按金额搜，比如 1450 或 86.50。拖动或做其他操作后，列表停在原来的位置，不会跳回顶部。</li>" +
+        "<li>左边有固定支出：研发、通用材料、运营成本、快递费用。支出可以直接拖到这些项目上。还可以自己再加别的项目。</li>" +
         "<li>单个产品的利润 = 这个月确认收货的买家实付 − 分到它上面的成本。还没确认收货的钱先不算利润。顶部的结余会把还没拖过去的支出也减掉。</li>" +
         "<li>数据写在程序旁边的「数据」文件夹里，不上传。把「月度算账.exe」和「数据」文件夹一起打包发给别人，对方打开就能看到已经导入、已经对应好的内容。</li>" +
         "</ol><button class='btn' data-act='close-modal'>知道了</button></div></div>";
@@ -912,6 +988,7 @@ function fmtQty(qty) {
         state.files = [];
         state.month = "";
         state.expanded = {};
+        state.categories = [];
         saveState();
         render();
       }
@@ -936,6 +1013,8 @@ function fmtQty(qty) {
     if (act === "clear-alloc") clearAlloc(node.dataset.id);
     if (act === "split") splitExpense(node.dataset.id);
     if (act === "remove-expense") removeExpense(node.dataset.id);
+    if (act === "add-category") addCategory();
+    if (act === "remove-category") removeCategory(node.dataset.name);
   });
 
   app.addEventListener("change", function (event) {
@@ -1020,6 +1099,7 @@ function fmtQty(qty) {
       state.files = saved.files || [];
       state.month = saved.month || "";
       state.expanded = saved.expanded || {};
+      state.categories = saved.categories || [];
     }
     ensureMonth();
     render();
