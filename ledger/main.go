@@ -4,6 +4,7 @@ package main
 
 import (
 	"embed"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -24,14 +25,11 @@ func main() {
 	}
 	go http.Serve(listener, http.FileServer(http.FS(assets)))
 
-	dataPath := filepath.Join(os.Getenv("APPDATA"), "月度算账")
-	if os.Getenv("APPDATA") == "" {
-		dir, dirErr := os.UserConfigDir()
-		if dirErr == nil {
-			dataPath = filepath.Join(dir, "月度算账")
-		}
+	dataPath, err := localDataDir()
+	if err != nil {
+		showError("数据文件夹没有建在程序旁边：" + err.Error())
+		return
 	}
-	_ = os.MkdirAll(dataPath, 0o755)
 
 	view := webview2.NewWithOptions(webview2.WebViewOptions{
 		Debug:     false,
@@ -51,6 +49,83 @@ func main() {
 	defer view.Destroy()
 	view.Navigate("http://" + listener.Addr().String() + "/index.html")
 	view.Run()
+}
+
+func localDataDir() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	dir := filepath.Join(filepath.Dir(exe), "数据")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	if !profileExists(dir) {
+		_ = copyTree(legacyDataDir(), dir)
+	}
+	return dir, nil
+}
+
+func legacyDataDir() string {
+	base := os.Getenv("APPDATA")
+	if base == "" {
+		if dir, err := os.UserConfigDir(); err == nil {
+			base = dir
+		}
+	}
+	if base == "" {
+		return ""
+	}
+	return filepath.Join(base, "月度算账")
+}
+
+func profileExists(dir string) bool {
+	info, err := os.Stat(filepath.Join(dir, "EBWebView"))
+	return err == nil && info.IsDir()
+}
+
+func copyTree(src, dst string) error {
+	if src == "" {
+		return nil
+	}
+	info, err := os.Stat(src)
+	if err != nil || !info.IsDir() {
+		return nil
+	}
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		in, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer in.Close()
+		out, err := os.Create(target)
+		if err != nil {
+			return err
+		}
+		_, copyErr := io.Copy(out, in)
+		closeErr := out.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		return closeErr
+	})
 }
 
 func showError(message string) {
