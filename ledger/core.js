@@ -16,8 +16,11 @@
       if (!isFinite(value)) return 0;
       return Math.round(value * 100);
     }
-    var text = String(value).replace(/,/g, "").replace(/元/g, "").trim();
-    if (!text || text === "无退款申请" || text === "-") return 0;
+    var text = String(value)
+      .replace(/[,，\s]/g, "")
+      .replace(/[元￥¥]/g, "")
+      .trim();
+    if (!text || text === "无退款申请" || text === "-" || text === "+") return 0;
     var number = Number(text);
     if (!isFinite(number)) return 0;
     return Math.round(number * 100);
@@ -240,7 +243,7 @@
     "付款金额",
     "实付金额"
   ];
-  var EXPENSE_DATE_HEADERS = ["支出日期", "日期", "入账时间", "付款时间", "发生时间", "时间"];
+  var EXPENSE_DATE_HEADERS = ["交易时间", "支出日期", "日期", "入账时间", "付款时间", "发生时间", "时间"];
   var EXPENSE_NOTE_HEADERS = ["备注", "说明", "附言"];
   var EXPENSE_QTY_HEADERS = ["数量", "购买数量"];
 
@@ -256,7 +259,90 @@
     };
   }
 
+  function cleanText(value) {
+    var text = String(value == null ? "" : value).replace(/\s+/g, " ").trim();
+    if (!text || text === "无") return "";
+    return text;
+  }
+
+  function joinUnique(parts) {
+    var out = [];
+    parts.forEach(function (part) {
+      if (!part || out.indexOf(part) !== -1) return;
+      out.push(part);
+    });
+    return out.join(" · ");
+  }
+
+  function guessStatementMapping(headers) {
+    var map = indexHeaders(headers);
+    var amount = pick(map, ["支出（-元）", "支出(-元)", "支出（－元）", "支出金额（元）", "支出金额(元)", "支出金额"].map(normHeader));
+    var income = pick(map, ["收入（+元）", "收入(+元)", "收入（＋元）", "收入金额（元）", "收入金额(元)", "收入金额"].map(normHeader));
+    if (amount < 0 || income < 0) return null;
+    return {
+      statement: true,
+      amount: amount,
+      income: income,
+      goods: pick(map, ["商品名称"].map(normHeader)),
+      summary: pick(map, ["摘要", "账务类型"].map(normHeader)),
+      counterparty: pick(map, ["对方名称", "对方户名"].map(normHeader)),
+      purpose: pick(map, ["用途"].map(normHeader)),
+      note: pick(map, ["备注", "附言", "说明"].map(normHeader)),
+      date: pick(map, EXPENSE_DATE_HEADERS.map(normHeader)),
+      qty: pick(map, EXPENSE_QTY_HEADERS.map(normHeader))
+    };
+  }
+
+  function parseStatement(matrix, headerAt, used) {
+    var expenses = [];
+    var incomes = [];
+    for (var i = headerAt + 1; i < matrix.length; i++) {
+      var row = matrix[i] || [];
+      var expenseCents = Math.abs(parseMoneyCents(cell(row, used.amount)));
+      var incomeCents = Math.abs(parseMoneyCents(cell(row, used.income)));
+      if (!expenseCents && !incomeCents) continue;
+      var dateWall = parseWall(cell(row, used.date));
+      var item = {
+        name: joinUnique([
+          cleanText(cell(row, used.summary)),
+          cleanText(cell(row, used.goods)),
+          cleanText(cell(row, used.counterparty))
+        ]) || "未命名",
+        note: joinUnique([
+          cleanText(cell(row, used.purpose)),
+          cleanText(cell(row, used.note))
+        ]),
+        qty: parseQty(cell(row, used.qty)),
+        dateWall: dateWall,
+        dateStamp: stamp(dateWall),
+        month: monthKey(dateWall)
+      };
+      if (expenseCents) {
+        expenses.push(Object.assign({ amountCents: expenseCents }, item));
+      }
+      if (incomeCents) {
+        incomes.push(Object.assign({ amountCents: incomeCents }, item));
+      }
+    }
+    return {
+      ok: true,
+      statement: true,
+      expenses: expenses,
+      incomes: incomes,
+      skippedIncome: 0,
+      headerAt: headerAt,
+      mapping: used
+    };
+  }
+
   function parseExpenseMatrix(matrix, mapping) {
+    if (!mapping) {
+      var scan = Math.min(matrix.length, 30);
+      for (var s = 0; s < scan; s++) {
+        var statement = guessStatementMapping(matrix[s] || []);
+        if (statement) return parseStatement(matrix, s, statement);
+      }
+    }
     var headerAt = -1;
     var guessed = null;
     var limit = Math.min(matrix.length, 30);
@@ -311,7 +397,9 @@
     }
     return {
       ok: true,
+      statement: false,
       expenses: expenses,
+      incomes: [],
       skippedIncome: skippedIncome,
       headerAt: headerAt,
       mapping: used

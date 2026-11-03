@@ -173,6 +173,9 @@ tr.selected td { box-shadow: inset 3px 0 0 var(--navy); }
   color: var(--muted);
   line-height: 1.6;
 }
+.income-block { border-bottom: 1px solid var(--line); }
+.income-block h3 { margin: 0; padding: 12px 14px 8px; font-size: 15px; }
+.income-row td { background: #f3faf6; }
 .files { display: flex; gap: 6px; flex-wrap: wrap; padding: 0 14px 10px; }
 .file-pill { font-size: 12px; background: #f3ecdf; border-radius: 999px; padding: 3px 8px; color: #5c5142; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .panel-head h3 { white-space: nowrap; }

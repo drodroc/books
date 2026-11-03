@@ -4,6 +4,7 @@
   var state = {
     lines: [],
     expenses: [],
+    incomes: [],
     files: [],
     month: "",
     query: "",
@@ -83,6 +84,7 @@ function fmtQty(qty) {
         tx.objectStore("kv").put({
           lines: state.lines,
           expenses: state.expenses,
+          incomes: state.incomes,
           files: state.files,
           month: state.month,
           expanded: state.expanded
@@ -100,7 +102,7 @@ function fmtQty(qty) {
         var node = document.querySelector(".toast");
         if (node) node.remove();
       }
-    }, 2800);
+    }, 7000);
   }
 
   function monthsInData() {
@@ -113,6 +115,9 @@ function fmtQty(qty) {
     });
     state.expenses.forEach(function (expense) {
       if (expense.month) set[expense.month] = true;
+    });
+    (state.incomes || []).forEach(function (income) {
+      if (income.month) set[income.month] = true;
     });
     return Object.keys(set).sort();
   }
@@ -175,7 +180,14 @@ function fmtQty(qty) {
             }
             error = trial.error;
           }
-          if (!parsed) throw new Error(file.name + "：" + error);
+          if (!parsed) {
+            var flows = parseWorkbookFlows(workbook);
+            if (flows.parsed) {
+              notes.push(adoptBook(flows.parsed, file.name));
+              return;
+            }
+            throw new Error(file.name + "：" + error);
+          }
           var result = mergeLines(parsed, file.name);
           notes.push(file.name + " 新增 " + result.added + " 行" + (result.skipped ? "，重复 " + result.skipped + " 行已跳过" : "") + "。下单时间用的是" + (result.timeField || "空") + "。");
         });
@@ -190,7 +202,17 @@ function fmtQty(qty) {
     });
   }
 
-  function addExpenses(parsed, fileName) {
+  function sumCents(items) {
+    return items.reduce(function (sum, item) { return sum + item.amountCents; }, 0);
+  }
+
+  function adoptBook(parsed, fileName) {
+    var incomes = parsed.incomes || [];
+    state.expenses = state.expenses.filter(function (item) { return item.sourceFile !== fileName; });
+    state.incomes = state.incomes.filter(function (item) { return item.sourceFile !== fileName; });
+    state.files = state.files.filter(function (item) {
+      return !(item.name === fileName && (item.kind === "expense" || item.kind === "statement"));
+    });
     parsed.expenses.forEach(function (expense) {
       state.expenses.push({
         id: uid(),
@@ -204,55 +226,78 @@ function fmtQty(qty) {
         allocs: []
       });
     });
+    incomes.forEach(function (income) {
+      state.incomes.push({
+        id: uid(),
+        name: income.name,
+        note: income.note,
+        amountCents: income.amountCents,
+        dateStamp: income.dateStamp,
+        month: income.month,
+        sourceFile: fileName
+      });
+    });
     state.files.push({
       name: fileName,
-      kind: "expense",
+      kind: incomes.length ? "statement" : "expense",
       added: parsed.expenses.length,
+      incomeAdded: incomes.length,
+      expenseCents: sumCents(parsed.expenses),
+      incomeCents: sumCents(incomes),
       at: Date.now()
     });
+    return fileName + "：支出 " + parsed.expenses.length + " 笔 " + fmtMoney(sumCents(parsed.expenses)) +
+      " 元，收入 " + incomes.length + " 笔 " + fmtMoney(sumCents(incomes)) + " 元。";
+  }
+
+  function parseWorkbookFlows(workbook) {
+    var matrices = sheetMatrix(workbook);
+    var parsed = null;
+    var fallback = null;
+    for (var i = 0; i < matrices.length; i++) {
+      var trial = core.parseExpenseMatrix(matrices[i]);
+      if (trial.ok && ((trial.expenses && trial.expenses.length) || (trial.incomes && trial.incomes.length))) {
+        parsed = trial;
+        break;
+      }
+      if (!fallback) fallback = trial;
+    }
+    return { parsed: parsed, fallback: fallback, matrix: matrices[0] || [] };
   }
 
   function importExpenseFiles(fileList) {
     var files = Array.prototype.slice.call(fileList || []);
     if (!files.length) return;
+    var notes = [];
+    var pendingMap = [];
     var chain = Promise.resolve();
     files.forEach(function (file) {
       chain = chain.then(function () {
         return readWorkbook(file).then(function (workbook) {
-          var matrices = sheetMatrix(workbook);
-          var parsed = null;
-          var fallback = null;
-          for (var i = 0; i < matrices.length; i++) {
-            var trial = core.parseExpenseMatrix(matrices[i]);
-            if (trial.ok && trial.expenses.length) {
-              parsed = trial;
-              break;
-            }
-            if (!fallback) fallback = trial;
-          }
-          if (!parsed) {
-            state.mapper = {
+          var found = parseWorkbookFlows(workbook);
+          if (!found.parsed) {
+            pendingMap.push({
               fileName: file.name,
-              matrix: matrices[0],
-              headers: (fallback && fallback.headers) || (matrices[0][0] || []).map(String),
-              headerAt: fallback && fallback.headerAt ? fallback.headerAt : 0,
-              error: (fallback && fallback.error) || "没有认出支出表"
-            };
-            render();
-            throw new Error("MAP");
+              matrix: found.matrix,
+              headers: (found.fallback && found.fallback.headers) || (found.matrix[0] || []).map(String),
+              headerAt: found.fallback && found.fallback.headerAt ? found.fallback.headerAt : 0,
+              error: (found.fallback && found.fallback.error) || "没有认出支出表"
+            });
+            notes.push(file.name + " 还没对上列。");
+            return;
           }
-          addExpenses(parsed, file.name);
-          var extra = parsed.skippedIncome ? " 收入行 " + parsed.skippedIncome + " 条没有当作支出。" : "";
-          toast(file.name + " 导入支出 " + parsed.expenses.length + " 笔。" + extra);
+          notes.push(adoptBook(found.parsed, file.name));
         });
       });
     });
     chain.then(function () {
       ensureMonth();
       saveState();
-      render();
+      state.mapperQueue = pendingMap.slice(1);
+      state.mapper = pendingMap[0] || null;
+      toast(notes.join(" "));
     }).catch(function (error) {
-      if (error.message !== "MAP") toast(error.message || "支出表没有导入成功");
+      toast(error.message || "支出表没有导入成功");
     });
   }
 
@@ -275,11 +320,12 @@ function fmtQty(qty) {
       toast(parsed.error || "按这个列对应关系，没有读到支出");
       return;
     }
-    addExpenses(parsed, mapper.fileName);
-    state.mapper = null;
+    var note = adoptBook(parsed, mapper.fileName);
+    state.mapper = (state.mapperQueue || []).shift() || null;
+    if (!state.mapper) state.mapperQueue = [];
     ensureMonth();
     saveState();
-    toast("导入支出 " + parsed.expenses.length + " 笔");
+    toast(note);
   }
 
   function zeroBucket() {
@@ -360,12 +406,21 @@ function fmtQty(qty) {
         attr.profitCents = attr.confirmed.cents - attr.costCents;
       });
     });
+    var incomes = (state.incomes || []).filter(function (income) {
+      return !income.month || income.month === state.month;
+    });
+    incomes.forEach(function (income) {
+      income.costCents = costByKey["I:" + income.id] || 0;
+      income.profitCents = income.amountCents - income.costCents;
+    });
     var allocated = expenses.reduce(function (sum, expense) {
       return sum + expense.allocs.reduce(function (inner, alloc) { return inner + alloc.cents; }, 0);
     }, 0);
     var expenseTotal = expenses.reduce(function (sum, expense) { return sum + expense.amountCents; }, 0);
     var unallocated = expenseTotal - allocated;
     report.expenses = expenses;
+    report.incomes = incomes;
+    report.incomeTotal = incomes.reduce(function (sum, income) { return sum + income.amountCents; }, 0);
     report.expenseTotal = expenseTotal;
     report.allocated = allocated;
     report.unallocated = unallocated;
@@ -583,7 +638,31 @@ function fmtQty(qty) {
       verdictClass = report.monthProfit > 0 ? "profit" : report.monthProfit < 0 ? "loss" : "";
       var word = report.monthProfit > 0 ? "赚了" : report.monthProfit < 0 ? "亏了" : "打平";
       verdict = "把这个月全部支出算上，" + word + " " + fmtMoney(Math.abs(report.monthProfit)) + " 元。";
+    } else if (state.expenses.length || state.incomes.length) {
+      verdict = monthLabel(state.month) + "支出 " + fmtMoney(report.expenseTotal) + " 元，账单收入 " + fmtMoney(report.incomeTotal) + " 元。把右边的支出拖到左边对应的那笔收入上。";
     }
+    var fileSeen = {};
+    var fileOrder = [];
+    function touchFile(name) {
+      if (!fileSeen[name]) {
+        fileSeen[name] = { expense: 0, income: 0 };
+        fileOrder.push(name);
+      }
+    }
+    report.expenses.forEach(function (expense) {
+      var name = expense.sourceFile || "未注明来源";
+      touchFile(name);
+      fileSeen[name].expense += expense.amountCents;
+    });
+    (report.incomes || []).forEach(function (income) {
+      var name = income.sourceFile || "未注明来源";
+      touchFile(name);
+      fileSeen[name].income += income.amountCents;
+    });
+    var fileBreakdown = fileOrder.map(function (name) {
+      var item = fileSeen[name];
+      return name + " 支出 " + fmtMoney(item.expense) + " 元" + (item.income ? "，收入 " + fmtMoney(item.income) + " 元" : "");
+    }).join("；");
 
     var monthOptions = months.map(function (month) {
       return "<option value='" + esc(month) + "'" + (month === state.month ? " selected" : "") + ">" + esc(monthLabel(month)) + "</option>";
@@ -594,9 +673,30 @@ function fmtQty(qty) {
       return "<span class='file-pill'>" + (file.kind === "expense" ? "支出 " : "收益 ") + esc(file.name) + "</span>";
     }).join("");
 
+    var shownIncomes = (report.incomes || []).filter(function (income) {
+      var q = state.query.trim().toLowerCase();
+      if (!q) return true;
+      return (income.name + " " + (income.note || "") + " " + (income.sourceFile || "")).toLowerCase().indexOf(q) !== -1;
+    });
+    var incomeRows = shownIncomes.map(function (income) {
+      var key = "I:" + income.id;
+      var badge = statusOf(income.costCents, income.profitCents, income.amountCents);
+      var selected = state.selectedProductKey === key ? " selected" : "";
+      return "<tr class='income-row droppable" + selected + "' data-drop='" + encodeURIComponent(key) + "' data-label='" + esc(income.name) + "'>" +
+        "<td class='product'><div class='product-name'><strong>" + esc(income.name) + "</strong><div class='hint'>" +
+        esc(fmtDate(income.dateStamp)) + (income.note ? " · " + esc(income.note) : "") + " · " + esc(income.sourceFile || "") +
+        "</div></div></td>" +
+        "<td class='num' colspan='2'>" + fmtMoney(income.amountCents) + "</td>" +
+        "<td class='num' colspan='2'>账单收入</td>" +
+        "<td class='num'>" + fmtMoney(income.costCents) + "</td>" +
+        "<td class='num'>" + fmtMoney(income.profitCents) + " <span class='tag " + badge.cls + "'>" + badge.text + "</span></td></tr>";
+    }).join("");
+    var incomeTable = incomeRows
+      ? "<div class='income-block'><h3>账单收入 · " + shownIncomes.length + " 笔</h3><table><thead><tr><th>收入</th><th class='num' colspan='2'>金额</th><th class='num' colspan='2'>来源</th><th class='num'>已对应成本</th><th class='num'>结余</th></tr></thead><tbody>" + incomeRows + "</tbody></table></div>"
+      : "";
     var body = "";
     if (!products.length) {
-      body = "<tr><td colspan='7'><div class='empty'>这个月还没有对得上的商品。导入淘宝商品订单报表后，同一商品标题、同一商品属性会加在一起。</div></td></tr>";
+      body = "<tr><td colspan='7'><div class='empty'>" + (incomeRows ? "商品订单报表还没导入。上面这些是账单里的收入，可以把支出拖到某一笔上。" : "这个月还没有对得上的商品。导入淘宝商品订单报表后，同一商品标题、同一商品属性会加在一起。") + "</div></td></tr>";
     } else {
       products.forEach(function (product) {
         body += rowHtml("title", product.title, "", product.confirmed, product.pending, product.costCents, product.profitCents, core.titleKey(product.title), product.title);
@@ -614,13 +714,13 @@ function fmtQty(qty) {
       var cls = "card" + (assigned ? " assigned" : "") + (state.selectedExpenseId === expense.id ? " selected" : "");
       var where = assigned
         ? "<div class='meta'>已分到「" + esc(assigned.targetLabel) + "」</div>"
-        : "<div class='meta'>还没分到产品。拖到左边，或先点一个产品再点分配。</div>";
+        : "<div class='meta'>还没对应。拖到左边的收入或商品上。</div>";
       return "<article class='" + cls + "' draggable='true' data-expense='" + esc(expense.id) + "'>" +
         "<div class='card-top'><strong>" + esc(expense.name) + "</strong><span class='money'>" + fmtMoney(expense.amountCents) + "</span></div>" +
         "<div class='meta'>" + esc(fmtDate(expense.dateStamp)) + (expense.note ? " · " + esc(expense.note) : "") + "</div>" +
         where +
         "<div class='card-actions'>" +
-          "<button class='btn tiny' data-act='assign-selected' data-id='" + esc(expense.id) + "'>分到选中产品</button>" +
+          "<button class='btn tiny' data-act='assign-selected' data-id='" + esc(expense.id) + "'>分到选中项</button>" +
           (assigned ? "<button class='btn tiny' data-act='clear-alloc' data-id='" + esc(expense.id) + "'>取消分配</button>" : "") +
           "<span class='split-box'><input id='split-" + esc(expense.id) + "' placeholder='拆出金额'><button class='btn tiny' data-act='split' data-id='" + esc(expense.id) + "'>拆出</button></span>" +
           "<button class='btn tiny danger' data-act='remove-expense' data-id='" + esc(expense.id) + "'>删除</button>" +
@@ -656,7 +756,7 @@ function fmtQty(qty) {
       "</header>" +
       "<section class='hero'>" +
         "<div><h2 class='" + verdictClass + "'>" + esc(verdict) + "</h2>" +
-          "<div class='sub'>尚未确认收货 " + fmtMoney(report.totals.pending.cents) + " 元先不计入利润。已分到产品的成本 " + fmtMoney(report.allocated) + " 元，还没拖过去的支出 " + fmtMoney(report.unallocated) + " 元。" +
+          "<div class='sub'>" + (fileBreakdown ? esc(fileBreakdown) + "。" : "") + "已对应的支出 " + fmtMoney(report.allocated) + " 元，还没拖过去的支出 " + fmtMoney(report.unallocated) + " 元。尚未确认收货 " + fmtMoney(report.totals.pending.cents) + " 元先不计入商品利润。" +
           (report.totals.refund.cents ? " 退款成功 " + fmtMoney(report.totals.refund.cents) + " 元已从收入里拿开。" : "") +
           (report.totals.later.cents ? " 另有本月下单、其他月份确认 " + fmtMoney(report.totals.later.cents) + " 元，不算进本月确认收货。" : "") +
           "</div></div>" +
@@ -673,6 +773,7 @@ function fmtQty(qty) {
           "</div></div>" +
           "<div class='chips'>" + filters + "</div>" +
           (filePills ? "<div class='files'>" + filePills + "</div>" : "") +
+          incomeTable +
           "<div class='table-wrap'><table><thead><tr>" +
             "<th>商品</th><th class='num'>确认数量</th><th class='num'>确认金额</th><th class='num'>未确认数量</th><th class='num'>未确认金额</th><th class='num'>成本</th><th class='num'>利润</th>" +
           "</tr></thead><tbody>" + body + "</tbody></table></div>" +
@@ -706,8 +807,8 @@ function fmtQty(qty) {
         "<li>当月确认收货：确认收货时间落在所选月份。尚未确认收货：付款时间在这个月，没有付款时间就看下单时间，并且确认收货时间为空。</li>" +
         "<li>退款成功不进这两栏。退款关闭留在原栏里。</li>" +
         "<li>没有付款时间、也没有确认收货、实付为 0 的行，当作没付成，不计入。</li>" +
-        "<li>支出表至少要有项目和金额。日期写了就会归到对应月份。一份支出对应几个产品时，先拆开再拖。</li>" +
-        "<li>拖到商品标题上，成本算整个商品的。拖到展开后的某个属性上，成本只算这个属性。</li>" +
+        "<li>支出表可以是自己做的项目和金额，也可以是支付宝账单（支出（-元）、收入（+元））或银行公户（支出金额、收入金额）。一次选中多张表会全部导入。同一份文件再导入一次，用新的替换旧的。</li>" +
+        "<li>账单里的收入单独列出来。把右边的支出拖到某一笔收入上，结余就是这笔收入减去对应成本。拖到商品标题上，成本算整个商品；拖到某个属性上，成本只算这个属性。一份支出对应几笔时，先拆开再拖。</li>" +
         "<li>单个产品的利润 = 这个月确认收货的买家实付 − 分到它上面的成本。还没确认收货的钱先不算利润。顶部的结余会把还没拖过去的支出也减掉。</li>" +
         "<li>数据只留在这台电脑上，不会上传。用月度算账软件时，记在本机的月度算账数据目录里；用浏览器打开同一页面时，记在这个浏览器里。换浏览器或清掉这些数据后需要重新导入。</li>" +
         "</ol><button class='btn' data-act='close-modal'>知道了</button></div></div>";
@@ -766,6 +867,7 @@ function fmtQty(qty) {
       if (window.confirm("清空这台电脑上保存的收益、支出和分配？")) {
         state.lines = [];
         state.expenses = [];
+        state.incomes = [];
         state.files = [];
         state.month = "";
         state.expanded = {};
@@ -865,6 +967,7 @@ function fmtQty(qty) {
     if (saved) {
       state.lines = saved.lines || [];
       state.expenses = saved.expenses || [];
+      state.incomes = saved.incomes || [];
       state.files = saved.files || [];
       state.month = saved.month || "";
       state.expanded = saved.expanded || {};

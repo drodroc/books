@@ -16,7 +16,10 @@ function assert(cond, message) {
   }
 }
 
-const yidian = matrixFrom("/home/ubuntu/.cursor/projects/workspace/uploads/____8_9_10____59ac.xlsx");
+const yidianPath = "/home/ubuntu/.cursor/projects/workspace/uploads/____8_9_10____59ac.xlsx";
+const financePath = "/home/ubuntu/.cursor/projects/workspace/uploads/____8_9_10__4af7.xlsx";
+if (fs.existsSync(yidianPath) && fs.existsSync(financePath)) {
+const yidian = matrixFrom(yidianPath);
 const parsed = core.parseRevenueMatrix(yidian);
 assert(parsed.ok, parsed.error);
 assert(parsed.timeField === "订单创建时间", "time field " + parsed.timeField);
@@ -36,7 +39,7 @@ parsed.lines.forEach(function (line) {
 var bucketSum = report.totals.confirmed.cents + report.totals.pending.cents + report.totals.later.cents + report.totals.refund.cents;
 assert(bucketSum === touched, "buckets " + bucketSum + " touched " + touched);
 
-const finance = matrixFrom("/home/ubuntu/.cursor/projects/workspace/uploads/____8_9_10__4af7.xlsx");
+const finance = matrixFrom(financePath);
 const financeParsed = core.parseRevenueMatrix(finance);
 assert(financeParsed.ok, financeParsed.error);
 assert(financeParsed.timeField === "订单付款时间", financeParsed.timeField);
@@ -62,6 +65,7 @@ const expense = core.parseExpenseMatrix([
 assert(expense.ok && expense.expenses.length === 2, "expense count");
 assert(expense.expenses[0].amountCents === 128050, "expense cents " + expense.expenses[0].amountCents);
 assert(expense.expenses[0].month === "2026-10", expense.expenses[0].month);
+assert(expense.incomes.length === 0, "plain expense sheet has no incomes");
 
 const same = core.parseRevenueMatrix(yidian);
 const seen = {};
@@ -71,12 +75,30 @@ parsed.lines.concat(same.lines).forEach(function (line) {
   seen[line.id] = true;
 });
 assert(dup === parsed.lines.length, "duplicate ids " + dup);
+}
 
-console.log("ok", {
-  yidianLines: parsed.lines.length,
-  confirmed: report.totals.confirmed.cents / 100,
-  pending: report.totals.pending.cents / 100,
-  financeConfirmed: financeReport.totals.confirmed.cents / 100,
-  financePending: financeReport.totals.pending.cents / 100,
-  products: report.products.length
+function matrixOf(file) {
+  const workbook = XLSX.read(fs.readFileSync(file), { type: "buffer", cellDates: true });
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  return XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: "" });
+}
+function cents(items) {
+  return items.reduce(function (sum, item) { return sum + item.amountCents; }, 0);
+}
+const books = [
+  ["/home/ubuntu/.cursor/projects/workspace/uploads/10_____228b.xlsx", 21042475, 1574410],
+  ["/home/ubuntu/.cursor/projects/workspace/uploads/10________38c4.xlsx", 7637935, 7240],
+  ["/home/ubuntu/.cursor/projects/workspace/uploads/____-__1_6a7d.xlsx", 34333441, 5167800]
+];
+books.forEach(function (item) {
+  const parsedBook = core.parseExpenseMatrix(matrixOf(item[0]));
+  assert(parsedBook.ok && parsedBook.statement, item[0]);
+  assert(cents(parsedBook.expenses) === item[1], item[0] + " expense " + cents(parsedBook.expenses));
+  assert(cents(parsedBook.incomes) === item[2], item[0] + " income " + cents(parsedBook.incomes));
+  assert(parsedBook.expenses.every(function (row) { return row.month === "2026-10"; }), item[0] + " month");
 });
+
+console.log("ok", books.map(function (item) {
+  const parsedBook = core.parseExpenseMatrix(matrixOf(item[0]));
+  return { file: item[0].split("/").pop(), expense: cents(parsedBook.expenses) / 100, income: cents(parsedBook.incomes) / 100 };
+}));
