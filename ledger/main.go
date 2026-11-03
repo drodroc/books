@@ -59,6 +59,7 @@ func localDataDir() (string, error) {
 	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
 		exe = resolved
 	}
+	// 「数据」这个目录名不能改。换掉 exe 后还是读这里，已经配对的账会留着。
 	dir := filepath.Join(filepath.Dir(exe), "数据")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err

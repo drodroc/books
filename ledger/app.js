@@ -596,7 +596,29 @@ function fmtQty(qty) {
     return "<td class='num'>" + fmtQty(bucket.qty) + "</td><td class='num'>" + fmtMoney(bucket.cents) + "</td>";
   }
 
-  function rowHtml(kind, title, attr, bucketConfirmed, bucketPending, cost, profit, key, label) {
+  function linksHtml(items) {
+    if (!items || !items.length) return "";
+    return "<div class='linked'>" + items.map(function (item) {
+      var via = item.via ? "<span class='muted'>（" + esc(item.via) + "）</span>" : "";
+      return "<div>已关联 " + esc(item.name) + via + " <b>" + fmtMoney(item.cents) + "</b></div>";
+    }).join("") + "</div>";
+  }
+
+  function expenseMatches(expense, query) {
+    if (!query) return true;
+    var q = query.toLowerCase().replace(/[,，\s￥¥元]/g, "");
+    var text = (expense.name + " " + (expense.note || "") + " " + (expense.sourceFile || "")).toLowerCase();
+    if (text.indexOf(query.toLowerCase()) !== -1) return true;
+    var amount = Math.abs(expense.amountCents) / 100;
+    var forms = [
+      amount.toFixed(2),
+      String(amount),
+      fmtMoney(expense.amountCents)
+    ].join(" ").replace(/[,，\s]/g, "").toLowerCase();
+    return q !== "" && forms.indexOf(q) !== -1;
+  }
+
+  function rowHtml(kind, title, attr, bucketConfirmed, bucketPending, cost, profit, key, label, linked) {
     var selected = state.selectedProductKey === key ? " selected" : "";
     var placeholder = title.indexOf("补差价") !== -1 ? "<div class='hint'>这个数量是按差价记的，不是实物件数</div>" : "";
     var name = kind === "title"
@@ -604,7 +626,7 @@ function fmtQty(qty) {
       : esc(attr || "（无商品属性）");
     var badge = statusOf(cost, profit, bucketConfirmed.cents);
     return "<tr class='" + kind + "-row droppable" + selected + "' data-drop='" + encodeURIComponent(key) + "' data-label='" + esc(label) + "'>" +
-      "<td class='product'><div class='product-name'>" + name + placeholder + "</div></td>" +
+      "<td class='product'><div class='product-name'>" + name + placeholder + linksHtml(linked) + "</div></td>" +
       bucketCells(bucketConfirmed) +
       bucketCells(bucketPending) +
       "<td class='num'>" + fmtMoney(cost) + "</td>" +
@@ -621,8 +643,7 @@ function fmtQty(qty) {
     var products = visibleProducts(report);
     var query = state.expenseQuery.trim();
     var expenses = report.expenses.filter(function (expense) {
-      if (!query) return true;
-      return (expense.name + " " + (expense.note || "")).toLowerCase().indexOf(query.toLowerCase()) !== -1;
+      return expenseMatches(expense, query);
     }).sort(function (a, b) {
       var aOpen = a.allocs.length ? 1 : 0;
       var bOpen = b.allocs.length ? 1 : 0;
@@ -673,6 +694,24 @@ function fmtQty(qty) {
       return "<span class='file-pill'>" + (file.kind === "expense" ? "支出 " : "收益 ") + esc(file.name) + "</span>";
     }).join("");
 
+    var linksByKey = {};
+    report.expenses.forEach(function (expense) {
+      (expense.allocs || []).forEach(function (alloc) {
+        if (!linksByKey[alloc.targetKey]) linksByKey[alloc.targetKey] = [];
+        linksByKey[alloc.targetKey].push({ name: expense.name, cents: alloc.cents });
+      });
+    });
+    function productLinks(product) {
+      var items = (linksByKey[core.titleKey(product.title)] || []).map(function (item) {
+        return { name: item.name, cents: item.cents, via: "" };
+      });
+      product.attrs.forEach(function (attr) {
+        (linksByKey[core.attrKey(product.title, attr.attr)] || []).forEach(function (item) {
+          items.push({ name: item.name, cents: item.cents, via: attr.attr || "（无商品属性）" });
+        });
+      });
+      return items;
+    }
     var shownIncomes = (report.incomes || []).filter(function (income) {
       var q = state.query.trim().toLowerCase();
       if (!q) return true;
@@ -685,7 +724,7 @@ function fmtQty(qty) {
       return "<tr class='income-row droppable" + selected + "' data-drop='" + encodeURIComponent(key) + "' data-label='" + esc(income.name) + "'>" +
         "<td class='product'><div class='product-name'><strong>" + esc(income.name) + "</strong><div class='hint'>" +
         esc(fmtDate(income.dateStamp)) + (income.note ? " · " + esc(income.note) : "") + " · " + esc(income.sourceFile || "") +
-        "</div></div></td>" +
+        "</div>" + linksHtml(linksByKey["I:" + income.id] || []) + "</div></td>" +
         "<td class='num' colspan='2'>" + fmtMoney(income.amountCents) + "</td>" +
         "<td class='num' colspan='2'>账单收入</td>" +
         "<td class='num'>" + fmtMoney(income.costCents) + "</td>" +
@@ -699,11 +738,12 @@ function fmtQty(qty) {
       body = "<tr><td colspan='7'><div class='empty'>" + (incomeRows ? "商品订单报表还没导入。上面这些是账单里的收入，可以把支出拖到某一笔上。" : "这个月还没有对得上的商品。导入淘宝商品订单报表后，同一商品标题、同一商品属性会加在一起。") + "</div></td></tr>";
     } else {
       products.forEach(function (product) {
-        body += rowHtml("title", product.title, "", product.confirmed, product.pending, product.costCents, product.profitCents, core.titleKey(product.title), product.title);
+        body += rowHtml("title", product.title, "", product.confirmed, product.pending, product.costCents, product.profitCents, core.titleKey(product.title), product.title, productLinks(product));
         if (state.expanded[product.title]) {
           product.attrs.forEach(function (attr) {
             var label = product.title + " / " + (attr.attr || "（无商品属性）");
-            body += rowHtml("attr", product.title, attr.attr, attr.confirmed, attr.pending, attr.costCents, attr.profitCents, core.attrKey(product.title, attr.attr), label);
+            var attrKey = core.attrKey(product.title, attr.attr);
+            body += rowHtml("attr", product.title, attr.attr, attr.confirmed, attr.pending, attr.costCents, attr.profitCents, attrKey, label, linksByKey[attrKey] || []);
           });
         }
       });
@@ -779,7 +819,7 @@ function fmtQty(qty) {
           "</tr></thead><tbody>" + body + "</tbody></table></div>" +
         "</section>" +
         "<aside class='panel expense-panel'>" +
-          "<div class='panel-head'><h3>支出 · " + expenses.length + " 笔</h3><div class='tools'><input id='expense-query' type='search' placeholder='搜支出' value='" + esc(state.expenseQuery) + "'></div></div>" +
+          "<div class='panel-head'><h3>支出 · " + expenses.length + " 笔</h3><div class='tools'><input id='expense-query' type='search' placeholder='搜名称或金额' value='" + esc(state.expenseQuery) + "'></div></div>" +
           "<div class='expense-list'>" + cards + "</div>" +
         "</aside>" +
       "</main>" +
@@ -808,7 +848,8 @@ function fmtQty(qty) {
         "<li>退款成功不进这两栏。退款关闭留在原栏里。</li>" +
         "<li>没有付款时间、也没有确认收货、实付为 0 的行，当作没付成，不计入。</li>" +
         "<li>支出表可以是自己做的项目和金额，也可以是支付宝账单（支出（-元）、收入（+元））或银行公户（支出金额、收入金额）。一次选中多张表会全部导入。同一份文件再导入一次，用新的替换旧的。</li>" +
-        "<li>账单里的收入单独列出来。把右边的支出拖到某一笔收入上，结余就是这笔收入减去对应成本。拖到商品标题上，成本算整个商品；拖到某个属性上，成本只算这个属性。一份支出对应几笔时，先拆开再拖。</li>" +
+        "<li>账单里的收入单独列出来。把右边的支出拖到某一笔收入上，结余就是这笔收入减去对应成本，这一笔下面会列出已经关联的支出和金额。拖到商品标题上，成本算整个商品；拖到某个属性上，成本只算这个属性。一份支出对应几笔时，先拆开再拖。</li>" +
+        "<li>右边的支出可以按名称搜，也可以按金额搜，比如 1450 或 86.50。</li>" +
         "<li>单个产品的利润 = 这个月确认收货的买家实付 − 分到它上面的成本。还没确认收货的钱先不算利润。顶部的结余会把还没拖过去的支出也减掉。</li>" +
         "<li>数据写在程序旁边的「数据」文件夹里，不上传。把「月度算账.exe」和「数据」文件夹一起打包发给别人，对方打开就能看到已经导入、已经对应好的内容。</li>" +
         "</ol><button class='btn' data-act='close-modal'>知道了</button></div></div>";
