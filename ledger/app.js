@@ -692,7 +692,7 @@ function fmtQty(qty) {
         "<td class='num'>" + fmtMoney(income.profitCents) + " <span class='tag " + badge.cls + "'>" + badge.text + "</span></td></tr>";
     }).join("");
     var incomeTable = incomeRows
-      ? "<div class='income-block'><h3>账单收入 · " + shownIncomes.length + " 笔</h3><table><thead><tr><th>收入</th><th class='num' colspan='2'>金额</th><th class='num' colspan='2'>来源</th><th class='num'>已对应成本</th><th class='num'>结余</th></tr></thead><tbody>" + incomeRows + "</tbody></table></div>"
+      ? "<div class='income-block'><h3>账单收入 · " + shownIncomes.length + " 笔</h3><div class='table-wrap income-scroll'><table><thead><tr><th>收入</th><th class='num' colspan='2'>金额</th><th class='num' colspan='2'>来源</th><th class='num'>已对应成本</th><th class='num'>结余</th></tr></thead><tbody>" + incomeRows + "</tbody></table></div></div>"
       : "";
     var body = "";
     if (!products.length) {
@@ -766,7 +766,7 @@ function fmtQty(qty) {
         "<div class='stat'><div class='k'>确认收货减全部支出</div><div class='v'>" + fmtMoney(report.monthProfit) + "</div></div>" +
       "</section>" +
       "<main class='layout'>" +
-        "<section class='panel'>" +
+        "<section class='panel" + (incomeRows ? " has-income" : "") + "'>" +
           "<div class='panel-head'><h3>收入 · 按商品</h3><div class='tools'>" +
             "<input id='query' type='search' placeholder='搜商品标题或属性' value='" + esc(state.query) + "'>" +
             "<select id='sort'><option value='confirmed'" + (state.sort === "confirmed" ? " selected" : "") + ">按确认收入</option><option value='profit'" + (state.sort === "profit" ? " selected" : "") + ">按利润从低到高</option><option value='name'" + (state.sort === "name" ? " selected" : "") + ">按名称</option></select>" +
@@ -774,7 +774,7 @@ function fmtQty(qty) {
           "<div class='chips'>" + filters + "</div>" +
           (filePills ? "<div class='files'>" + filePills + "</div>" : "") +
           incomeTable +
-          "<div class='table-wrap'><table><thead><tr>" +
+          "<div class='table-wrap product-scroll'><table><thead><tr>" +
             "<th>商品</th><th class='num'>确认数量</th><th class='num'>确认金额</th><th class='num'>未确认数量</th><th class='num'>未确认金额</th><th class='num'>成本</th><th class='num'>利润</th>" +
           "</tr></thead><tbody>" + body + "</tbody></table></div>" +
         "</section>" +
@@ -936,6 +936,14 @@ function fmtQty(qty) {
   });
 
   app.addEventListener("dragover", function (event) {
+    var scroller = event.target.closest(".table-wrap, .expense-list");
+    if (scroller) {
+      var rect = scroller.getBoundingClientRect();
+      var edge = 64;
+      if (event.clientY < rect.top + edge) scroller.scrollTop -= 18;
+      else if (event.clientY > rect.bottom - edge) scroller.scrollTop += 18;
+      event.preventDefault();
+    }
     var row = event.target.closest("[data-drop]");
     if (!row) return;
     event.preventDefault();

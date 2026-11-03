@@ -126,7 +126,19 @@ select.month, .top select {
 }
 .chip.on { background: var(--navy); color: white; border-color: var(--navy); }
 
-.table-wrap { overflow: auto; max-height: calc(100vh - 280px); }
+.table-wrap {
+  overflow-x: auto;
+  overflow-y: scroll;
+  max-height: calc(100vh - 320px);
+  scrollbar-gutter: stable;
+  scrollbar-width: auto;
+  scrollbar-color: #6d8296 #f3ecdf;
+}
+.table-wrap::-webkit-scrollbar { width: 14px; height: 14px; }
+.table-wrap::-webkit-scrollbar-thumb { background: #6d8296; border-radius: 8px; border: 3px solid #f3ecdf; }
+.table-wrap::-webkit-scrollbar-track { background: #f3ecdf; }
+.panel.has-income .income-scroll,
+.panel.has-income .product-scroll { max-height: calc((100vh - 380px) / 2); min-height: 180px; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { padding: 8px 10px; border-bottom: 1px solid #efe7da; vertical-align: middle; }
 th {
@@ -150,7 +162,21 @@ tr.selected td { box-shadow: inset 3px 0 0 var(--navy); }
 }
 .hint { font-size: 12px; color: var(--amber); }
 
-.expense-list { padding: 10px; display: flex; flex-direction: column; gap: 8px; max-height: calc(100vh - 300px); overflow: auto; }
+.expense-list {
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: calc(100vh - 300px);
+  overflow-x: hidden;
+  overflow-y: scroll;
+  scrollbar-gutter: stable;
+  scrollbar-width: auto;
+  scrollbar-color: #6d8296 #f3ecdf;
+}
+.expense-list::-webkit-scrollbar { width: 14px; }
+.expense-list::-webkit-scrollbar-thumb { background: #6d8296; border-radius: 8px; border: 3px solid #f3ecdf; }
+.expense-list::-webkit-scrollbar-track { background: #f3ecdf; }
 .card {
   border: 1px dashed #c8b89a;
   background: #fffaf1;
@@ -209,5 +235,5 @@ tr.selected td { box-shadow: inset 3px 0 0 var(--navy); }
   .top-actions, .expense-panel, .chips, .tools, .toast, .card-actions { display: none !important; }
   body { min-width: 0; background: white; }
   .layout { display: block; padding: 0; }
-  .table-wrap { max-height: none; }
+  .table-wrap, .expense-list { max-height: none; overflow: visible; }
 }
