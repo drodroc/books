@@ -13,6 +13,7 @@
     sort: "confirmed",
     expanded: {},
     categories: [],
+    renamingId: "",
     selectedExpenseId: "",
     selectedProductKey: "",
     detail: null,
@@ -502,8 +503,9 @@ function fmtQty(qty) {
       expense.allocs[0].cents = expense.amountCents - cents;
     }
     expense.amountCents -= cents;
+    var pieceId = uid();
     state.expenses.push({
-      id: uid(),
+      id: pieceId,
       name: expense.name,
       note: expense.note,
       amountCents: cents,
@@ -513,8 +515,24 @@ function fmtQty(qty) {
       sourceFile: expense.sourceFile,
       allocs: []
     });
+    state.renamingId = pieceId;
     saveState();
-    toast("已拆出 " + fmtMoney(cents) + " 元，拖到另一个产品上");
+    toast("已拆出 " + fmtMoney(cents) + " 元。可以直接改这一笔的名称。");
+  }
+
+  function saveExpenseName(expenseId) {
+    var expense = state.expenses.filter(function (item) { return item.id === expenseId; })[0];
+    var input = document.getElementById("rename-" + expenseId);
+    if (!expense || !input) return;
+    var name = input.value.trim();
+    if (!name) {
+      toast("名称要留下一点字");
+      return;
+    }
+    expense.name = name;
+    if (state.renamingId === expenseId) state.renamingId = "";
+    saveState();
+    render();
   }
 
   function addCategory() {
@@ -824,18 +842,25 @@ function fmtQty(qty) {
 
     var cards = expenses.map(function (expense) {
       var assigned = expense.allocs[0];
+      var renaming = state.renamingId === expense.id;
       var cls = "card" + (assigned ? " assigned" : "") + (state.selectedExpenseId === expense.id ? " selected" : "");
       var where = assigned
         ? "<div class='meta'>已分到「" + esc(assigned.targetLabel) + "」</div>"
         : "<div class='meta'>还没对应。拖到左边的收入、固定项目或商品上。</div>";
-      return "<article class='" + cls + "' draggable='true' data-expense='" + esc(expense.id) + "'>" +
-        "<div class='card-top'><strong>" + esc(expense.name) + "</strong><span class='money'>" + fmtMoney(expense.amountCents) + "</span></div>" +
+      var titleHtml = renaming
+        ? "<input class='rename' id='rename-" + esc(expense.id) + "' data-id='" + esc(expense.id) + "' value='" + esc(expense.name) + "'>"
+        : "<strong>" + esc(expense.name) + "</strong>";
+      return "<article class='" + cls + "' draggable='" + (renaming ? "false" : "true") + "' data-expense='" + esc(expense.id) + "'>" +
+        "<div class='card-top'>" + titleHtml + "<span class='money'>" + fmtMoney(expense.amountCents) + "</span></div>" +
         "<div class='meta'>" + esc(fmtDate(expense.dateStamp)) + (expense.note ? " · " + esc(expense.note) : "") + "</div>" +
         where +
         "<div class='card-actions'>" +
           "<button class='btn tiny' data-act='assign-selected' data-id='" + esc(expense.id) + "'>分到选中项</button>" +
           (assigned ? "<button class='btn tiny' data-act='clear-alloc' data-id='" + esc(expense.id) + "'>取消分配</button>" : "") +
           "<span class='split-box'><input id='split-" + esc(expense.id) + "' placeholder='拆出金额'><button class='btn tiny' data-act='split' data-id='" + esc(expense.id) + "'>拆出</button></span>" +
+          (renaming
+            ? "<button class='btn tiny' data-act='save-name' data-id='" + esc(expense.id) + "'>保存名称</button>"
+            : "<button class='btn tiny' data-act='rename' data-id='" + esc(expense.id) + "'>改名</button>") +
           "<button class='btn tiny danger' data-act='remove-expense' data-id='" + esc(expense.id) + "'>删除</button>" +
         "</div></article>";
     }).join("");
@@ -913,6 +938,13 @@ function fmtQty(qty) {
       }
     }
     restoreScroll(scrollPos);
+    if (state.renamingId) {
+      var rename = document.getElementById("rename-" + state.renamingId);
+      if (rename) {
+        rename.focus();
+        rename.select();
+      }
+    }
   }
 
   function modalHtml() {
@@ -925,6 +957,7 @@ function fmtQty(qty) {
         "<li>支出表可以是自己做的项目和金额，也可以是支付宝账单（支出（-元）、收入（+元））或银行公户（支出金额、收入金额）。一次选中多张表会全部导入。同一份文件再导入一次，用新的替换旧的。</li>" +
         "<li>账单里的收入单独列出来。把右边的支出拖到某一笔收入上，结余就是这笔收入减去对应成本，这一笔下面会列出已经关联的支出和金额。拖到商品标题上，成本算整个商品；拖到某个属性上，成本只算这个属性。一份支出对应几笔时，先拆开再拖。</li>" +
         "<li>右边的支出可以按名称搜，也可以按金额搜，比如 1450 或 86.50。拖动或做其他操作后，列表停在原来的位置，不会跳回顶部。</li>" +
+        "<li>拆出来的一笔可以马上改名称。其他支出点「改名」也能改，改完后左边已经关联的地方会显示新名字。</li>" +
         "<li>左边有固定支出：研发、通用材料、运营成本、快递费用。支出可以直接拖到这些项目上。还可以自己再加别的项目。</li>" +
         "<li>单个产品的利润 = 这个月确认收货的买家实付 − 分到它上面的成本。还没确认收货的钱先不算利润。顶部的结余会把还没拖过去的支出也减掉。</li>" +
         "<li>数据写在程序旁边的「数据」文件夹里，不上传。把「月度算账.exe」和「数据」文件夹一起打包发给别人，对方打开就能看到已经导入、已经对应好的内容。</li>" +
@@ -1012,6 +1045,11 @@ function fmtQty(qty) {
     }
     if (act === "clear-alloc") clearAlloc(node.dataset.id);
     if (act === "split") splitExpense(node.dataset.id);
+    if (act === "rename") {
+      state.renamingId = node.dataset.id;
+      render();
+    }
+    if (act === "save-name") saveExpenseName(node.dataset.id);
     if (act === "remove-expense") removeExpense(node.dataset.id);
     if (act === "add-category") addCategory();
     if (act === "remove-category") removeCategory(node.dataset.name);
@@ -1037,7 +1075,15 @@ function fmtQty(qty) {
     }
   });
 
+  app.addEventListener("keydown", function (event) {
+    if (event.key === "Enter" && event.target.classList && event.target.classList.contains("rename")) {
+      event.preventDefault();
+      saveExpenseName(event.target.dataset.id);
+    }
+  });
+
   function rememberSearch(event) {
+    if (event.target.classList && event.target.classList.contains("rename")) return;
     if (event.target.id !== "query" && event.target.id !== "expense-query") return;
     if (event.target.id === "query") state.query = event.target.value;
     if (event.target.id === "expense-query") state.expenseQuery = event.target.value;
@@ -1048,6 +1094,10 @@ function fmtQty(qty) {
   app.addEventListener("compositionend", rememberSearch);
 
   app.addEventListener("dragstart", function (event) {
+    if (event.target.closest("input, button, textarea")) {
+      event.preventDefault();
+      return;
+    }
     var card = event.target.closest("[data-expense]");
     if (!card) return;
     event.dataTransfer.setData("text/plain", card.dataset.expense);

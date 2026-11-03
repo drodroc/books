@@ -195,6 +195,7 @@ tr.selected td { box-shadow: inset 3px 0 0 var(--navy); }
 .card-actions { display: flex; gap: 6px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
 .split-box { display: flex; gap: 4px; align-items: center; }
 .split-box input { width: 88px; padding: 4px 6px; }
+.rename { flex: 1; min-width: 0; border: 1px solid #1f4e79; border-radius: 6px; padding: 4px 6px; font-weight: 650; }
 
 .empty {
   margin: 28px 16px;
